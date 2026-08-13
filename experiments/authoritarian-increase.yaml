@@ -1,0 +1,10 @@
+# Example experiment: increase authoritarian population vs. control.
+# Load via configs/loader.load_config(), or POST as `config` to /api/society/create.
+population:
+  count: 1000
+  ideology_distribution:
+    liberal: 0.20
+    conservative: 0.20
+    socialist: 0.10
+    libertarian: 0.05
+    authoritarian: 0.45

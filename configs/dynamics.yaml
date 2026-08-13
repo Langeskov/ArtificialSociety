@@ -1,0 +1,35 @@
+# v0.2 Stability & Dynamics parameters (项目计划书 §38).
+# 这些值会通过 load_config 深合并进 default_society_config，可被 UI/API 覆盖。
+
+politics:
+  inertia: 0.95                    # 政治惯性 (§4)
+  inertia_range: [0.85, 0.98]      # 每个 Agent 在此区间采样
+  damping: 0.92                    # 政治阻尼 (§5)
+  center_stability: 0.005          # 中心稳定力 (§6)
+  max_movement_per_tick: 0.03      # 单 tick 最大位移 (§37)
+  extremism_threshold: 0.7         # 极端化阈值 (§7)
+
+social:
+  influence_strength: 0.01         # 社会影响强度 (§22)
+  echo_threshold: 0.4              # 回音室政治距离阈值 (§23)
+  information_spread: 0.10         # 信息传播基础概率 (§19)
+  information_delay: 3             # 信息传播初始延迟 tick (§20)
+  memory_decay: 0.97               # 记忆衰减 (§21)
+  memory_size: 20                  # 记忆容量
+
+events:
+  decay_rate: 0.03                 # 事件强度衰减 (§11)
+  default_duration: 20             # 默认事件生命周期 tick (§10)
+  resolution_threshold: 0.05       # 低于此强度 → RESOLVED
+
+resources:
+  recovery_rate: 0.05              # 生产恢复速率 (§13)
+  food_production: 0.12            # 人均食物生产 (§14)
+  food_critical: 20.0              # 粮食临界阈值 (§15)
+
+stability:
+  collapse_variance_threshold: 0.02   # 政治方差塌缩阈值 (§26)
+  collapse_consecutive_ticks: 20      # 连续 N tick 判定崩溃
+  boundary_warning_ratio: 0.30        # 边界集中警告阈值 (§27)
+  boundary_critical_ratio: 0.60       # 边界集中崩溃阈值
+  temperature_critical: 0.85          # 社会温度临界值

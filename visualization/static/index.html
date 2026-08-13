@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>人工社会 · 三维政治光谱</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- 顶栏 -->
+    <div id="topbar">
+      <span class="brand">🧬 人工社会模拟</span>
+      <span class="time" id="sim-time">第 0 年 | 第 1 日 | Tick 0</span>
+      <span class="status created" id="sim-status">已创建</span>
+      <span class="time" id="sim-speed">速度 ×100</span>
+      <span class="spacer"></span>
+      <button id="btn-play" class="primary">▶ 播放</button>
+      <button id="btn-pause">⏸ 暂停</button>
+      <button id="btn-step">⏭ 单步</button>
+      <button id="btn-reset" class="danger">↺ 重置</button>
+      <select id="speed-select" title="模拟速度">
+        <option value="1">×1</option>
+        <option value="5">×5</option>
+        <option value="10">×10</option>
+        <option value="50">×50</option>
+        <option value="100" selected>×100</option>
+        <option value="500">×500</option>
+      </select>
+    </div>
+
+    <!-- 左侧：配置与控制 -->
+    <div id="left" class="panel">
+      <h3>社会配置</h3>
+
+      <div class="field">
+        <label>Agent 数量</label>
+        <input type="number" id="cfg-agents" value="1000" min="1" max="20000" />
+      </div>
+      <div class="field">
+        <label>随机种子</label>
+        <input type="number" id="cfg-seed" value="42" />
+      </div>
+
+      <div class="section-title">意识形态分布（%）</div>
+      <div class="dist-grid" id="ideology-dist"></div>
+
+      <div class="section-title">人格分布</div>
+      <div class="field">
+        <label>高宜人性 %</label>
+        <input type="number" id="cfg-pers-high" value="30" min="0" max="100" />
+      </div>
+      <div class="field">
+        <label>高风险偏好 %</label>
+        <input type="number" id="cfg-pers-risk" value="20" min="0" max="100" />
+      </div>
+
+      <div class="section-title">经济</div>
+      <div class="field">
+        <label>税率</label>
+        <input type="number" id="cfg-tax" value="0.08" min="0" max="0.5" step="0.01" />
+      </div>
+      <div class="field">
+        <label>事件频率</label>
+        <input type="number" id="cfg-event-freq" value="0.02" min="0" max="1" step="0.005" />
+      </div>
+
+      <div class="section-title">模型提供方</div>
+      <div class="field">
+        <label>提供方</label>
+        <select id="cfg-provider">
+          <option value="rule_based" selected>规则型（离线）</option>
+          <option value="ollama">Ollama / OpenAI 兼容</option>
+        </select>
+      </div>
+      <div class="field" id="cfg-baseurl-wrap" style="display:none">
+        <label>接口地址</label>
+        <input type="text" id="cfg-baseurl" value="http://127.0.0.1:11434/v1" />
+      </div>
+
+      <button id="btn-create" class="primary" style="width:100%;margin-top:14px;padding:8px">⚙ 创建社会</button>
+    </div>
+
+    <!-- 中央：三维政治光谱 -->
+    <div id="center" class="panel">
+      <div class="mode-bar">
+        <span style="color:var(--muted);font-size:11px">显示模式：</span>
+        <button data-mode="individual" class="active">个体</button>
+        <button data-mode="density">密度</button>
+        <button data-mode="group">群体</button>
+        <button data-mode="trajectory">轨迹</button>
+        <span style="width:8px"></span>
+        <button id="btn-velocity" title="显示政治移动方向向量">速度向量</button>
+        <span style="width:8px"></span>
+        <span style="color:var(--muted);font-size:11px">投影：</span>
+        <button data-proj="3d" class="active">3D</button>
+        <button data-proj="xy">XY</button>
+        <button data-proj="xz">XZ</button>
+        <button data-proj="yz">YZ</button>
+        <span class="spacer" style="flex:1"></span>
+        <span id="axis-dominance" style="color:var(--amber);font-weight:600;font-size:12px"></span>
+        <span id="collapse-banner" style="display:none;color:#f85149;font-weight:600;font-size:12px"></span>
+      </div>
+      <div id="spectrum-wrap">
+        <canvas id="spectrum-canvas"></canvas>
+        <div id="spectrum-legend"></div>
+        <div id="spectrum-hint">拖动 = 旋转 · 滚轮 = 缩放 · 右键拖动 = 平移 · 点击 = 选中 Agent</div>
+      </div>
+    </div>
+
+    <!-- 右侧：指标 + 详情 -->
+    <div id="right" class="panel">
+      <h3>社会指标</h3>
+      <div id="metrics-list"></div>
+      <div class="section-title">Agent 详情</div>
+      <div id="agent-inspector"><div class="kv"><span class="k">点击一个 Agent…</span></div></div>
+    </div>
+
+    <!-- 底部：事件时间线 + 因果链 -->
+    <div id="bottom" class="panel">
+      <div class="tab-bar">
+        <button class="active" data-tab="timeline">事件时间线</button>
+        <button data-tab="graph">事件因果链</button>
+        <button data-tab="distribution">X/Y/Z 分布</button>
+        <button data-tab="clusters">政治簇</button>
+      </div>
+      <div id="timeline-list"></div>
+    </div>
+  </div>
+
+  <script src="/static/js/spectrum3d.js"></script>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

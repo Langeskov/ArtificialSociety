@@ -1,0 +1,87 @@
+# Default society configuration — see configs/loader.py for the schema.
+# Every field here can be overridden via the UI or the REST API.
+name: "Unnamed Society"
+seed: 0
+ticks_per_day: 100
+days_per_month: 30
+months_per_year: 12
+
+population:
+  count: 1000
+  age_range: [18, 75]
+  ideology_distribution:
+    liberal: 0.30
+    conservative: 0.30
+    socialist: 0.20
+    libertarian: 0.10
+    authoritarian: 0.10
+  personality_distribution:
+    agreeableness: { high: 0.3, neutral: 0.4, low: 0.3 }
+    risk_tolerance: { high: 0.2, neutral: 0.5, low: 0.3 }
+  initial_resources:
+    money: { mean: 500, sigma: 200 }
+    food: { mean: 100, sigma: 20 }
+    energy: { mean: 80, sigma: 20 }
+    property: { mean: 200, sigma: 150 }
+    influence: { mean: 5, sigma: 5 }
+    information: { mean: 20, sigma: 10 }
+  ai_levels: { level0: 0.90, level1: 0.09, level2: 0.0, level3: 0.01 }
+
+economy:
+  base_income: 3.0
+  income_sigma: 2.0
+  food_consumption: 0.05
+  energy_consumption: 0.03
+  tax_rate: 0.08
+  redistribution: 0.5
+  food_production: 0.12
+  energy_production: 0.06
+  food_critical: 20.0
+  recovery_rate: 0.05
+
+politics:
+  movement_strength: 0.01
+  influence_strength: 0.01
+  inertia: 0.95
+  inertia_range: [0.85, 0.98]
+  damping: 0.92
+  center_stability: 0.005
+  ideology_anchor_strength: 0.02
+  max_movement_per_tick: 0.03
+  extremism_threshold: 0.7
+  noise: 0.004
+
+social:
+  influence_strength: 0.01
+  echo_threshold: 0.4
+  information_spread: 0.10
+  information_delay: 3
+  memory_decay: 0.97
+  memory_size: 20
+
+relationships:
+  avg_degree: 6
+
+events:
+  frequency: 0.02
+  decay_rate: 0.03
+  default_duration: 20
+  resolution_threshold: 0.05
+
+stability:
+  collapse_variance_threshold: 0.02
+  collapse_consecutive_ticks: 20
+  boundary_warning_ratio: 0.30
+  boundary_critical_ratio: 0.60
+  temperature_critical: 0.85
+
+model:
+  provider: rule_based
+  base_url: "http://127.0.0.1:11434/v1"
+  api_key: ""
+  model_name: ""
+
+axes:
+  x: { name: "经济自由 ↔ 经济管控", positive: "经济自由", negative: "经济管控" }
+  y: { name: "自由 ↔ 权威", positive: "权威", negative: "自由" }
+  z: { name: "个人主义 ↔ 集体主义", positive: "个人主义", negative: "集体主义" }

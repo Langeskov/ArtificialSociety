@@ -4,7 +4,7 @@
 
 > 规则优先于智能，社会优先于个体，观察优先于预设结论。
 
-本项目实现了《Multi-Agent Artificial Society & 3D Political Spectrum 项目计划书 v0.1》**第一阶段 MVP 的完整闭环**，并已依次升级至 **v0.2（Stability & Dynamics Patch）** 和 **v0.3（Political Dynamics & Observability）**：
+本项目实现了《Multi-Agent Artificial Society & 3D Political Spectrum v0.1》**第一阶段 MVP 的完整闭环**，并已依次升级至 **v0.2（Stability & Dynamics Patch）** 和 **v0.3（Political Dynamics & Observability）**：
 
 ```
 参数 → Agent → 行为 → 事件 → 社会变化 → 三维空间 → 可视化 → 可重复实验
@@ -251,7 +251,7 @@ LLM 使用比例 · Model Provider · Model Name
 
 引擎与 I/O 解耦：`engine/` 不 import FastAPI/SQLite/网络库，可独立单测与回放。
 
-## 当前问题（已知限制）
+## 当前问题和已知限制
 
 1. **性能未达目标**：v0.3 引入三轴力分解 + 观测指标后，1000 Agent 从 v0.2 的 ~67
    ticks/sec 降到 46，本轮优化回补到 **61**，仍未达到计划书 ~80 的目标。
@@ -262,20 +262,13 @@ LLM 使用比例 · Model Provider · Model Name
    `scripts/longrun_report.py` 的 `DAYS` 可调）。结论方向可信，但未完成完整 1000 天。
 3. **社会影响是静态网络**：关系网络在初始化后不再演化，信息传播/回音室基于固定拓扑；
    群体形成、就业、贸易、政党等高级社会动力学（计划书 Phase 8）尚未实现。
-4. **可视化未经自动截图验证**：浏览器自动化环境（npm 缓存 EPERM）无法自动截图 3D
-   画布，前端视觉效果需人工打开页面确认。
 
 ## 下一步优化
 
 1. **性能（优先级最高）**：用 NumPy 批量向量化 `compute_forces`（把三轴力计算改成
    数组运算），或把社会影响改为稀疏矩阵乘，目标回到 ~80+ ticks/sec；同时缓存邻居
    Agent 对象引用，去掉社会循环里的 `agent_map.get(nid)`。
-2. **补跑完整长跑**：在性能达标后跑 1000 × 1000 天 × 10 Society，产出正式报告。
-3. **动态社会网络**：实现群体形成/加入/退出、就业、贸易、政党，让 Z 轴（集体↔个体）
+2. **动态社会网络**：实现群体形成/加入/退出、就业、贸易、政党，让 Z 轴（集体↔个体）
    与 Y 轴（权威↔自由）拥有更丰富的内生驱动。
-4. **实验工具链**：参数敏感性分析、蒙特卡洛多种子扫描、轨迹回放对比，完善
+3. **实验工具链**：参数敏感性分析、蒙特卡洛多种子扫描、轨迹回放对比，完善
    `experiments/` 目录。
-
-## License
-
-MIT

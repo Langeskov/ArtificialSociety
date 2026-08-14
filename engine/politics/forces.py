@@ -1,17 +1,18 @@
-"""Axis Force Registry — 统一计算三轴政治力（项目计划书 v0.3 §4, §5, §6, §7, §9).
+"""Axis Force Registry — v0.3.1 校准版（连续 X / 双向 Z / 多驱动 Y）。
 
-每个政治力源显式标注其作用轴与强度，输出可解释的力分解（Axis Contribution
-Breakdown）。三轴拥有**不同的主要驱动力**：
+v0.3.1 修复（见 docs/political_dynamics_v0.3.1_audit.md）：
 
-  * X（经济/分配）  ← 资源稀缺、财富、税收、不平等
-  * Y（社会/权威）  ← 政府合法性、信任、冲突、权威偏好
-  * Z（个体/集体）  ← 社会联结、隔离、互助、群体归属
+  * X（经济）  ← 连续 econ_bias（tanh） + deadzone + saturation，消除二值分叉 (§4–§7)
+  * Y（权威）  ← 多驱动：legitimacy + security + institutional，双向压力 (§13–§15)
+  * Z（集体）  ← 双向偏好：autonomy_preference vs belonging_need + group_pressure，
+                消除社会联结带来的永久 Z+ 偏置 (§8–§12)
 
-禁止用随机噪声伪造 Y/Z 运动（§47）：每个力源都是可解释的机制。
+禁止用随机噪声伪造 Y/Z 运动（§24, §47）：每个力源都是可解释机制。
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Optional
 
@@ -49,25 +50,61 @@ EVENT_SALIENCE: dict[str, tuple[float, float, float]] = {
     "food_stabilization":  (0.1, 0.1, 0.2),
 }
 
+# Y 轴信号分类（§13, §14）
+_SECURITY_EVENTS = {"conflict", "war", "protest"}
+_INSTITUTIONAL_EVENTS = {"government_response", "leadership_change", "scandal", "reform", "recovery", "food_stabilization"}
 
-def interpret_event(event_type: str, agent: Agent) -> tuple[float, float, float]:
-    """个体化事件解读（§8, §9）：同一事件对不同 Agent 产生不同甚至相反的方向。"""
-    sx, sy, sz = EVENT_SALIENCE.get(event_type, (0.1, 0.1, 0.1))
+
+def _autonomy_preference(p) -> float:
+    """自主偏好（个体主义倾向）∈ [0,1]，从人格映射，非硬映射（§9）。"""
+    return (p["openness"] + p["risk_tolerance"] + (1.0 - p["agreeableness"])) / 3.0
+
+
+def _belonging_need(p) -> float:
+    """归属需求（集体主义倾向）∈ [0,1]，从人格映射，非硬映射（§9）。"""
+    return (p["agreeableness"] + p["empathy"] + p["extraversion"]) / 3.0
+
+
+def _econ_bias(gov: float, sensitivity: float, deadzone: float) -> float:
+    """连续经济方向响应（§4, §5）：gov=0→+1, gov=0.5→0, gov=1→−1，无二值翻转。"""
+    bias = math.tanh((0.5 - gov) * sensitivity)
+    # deadzone：近中心减弱（让中间人格不被微小 trust 差异强行分流）
+    a = abs(bias)
+    if deadzone > 0.0 and a < deadzone:
+        bias *= a / deadzone
+    return bias
+
+
+def _pressure_response(pressure: float, saturation: float) -> float:
+    """压力饱和（§6）：tanh 有界，小压力强响应、大压力饱和，不会 fx→∞。"""
+    if saturation <= 0.0:
+        return pressure
+    return math.tanh(pressure * saturation)
+
+
+def interpret_event(event_type: str, agent: Agent, sensitivity: float = 1.0, deadzone: float = 0.0) -> tuple[float, float, float]:
+    """个体化事件解读（§8, §9）：同一事件对不同 Agent 产生不同甚至相反的方向。
+
+    v0.3.1：X 方向改连续（§4），Z 方向改双向偏好（§9），不再 empathy→Z- 硬映射。
+    """
+    sx, sy, sz = EVENT_SALIENCE.get(event_type, _DEFAULT_SALIENCE)
     p = agent.personality
     trust = p["trust"]
     authority = p["authority_preference"]
-    empathy = p["empathy"]
     risk = p["risk_tolerance"]
 
     reactivity = 0.3 + (1.0 - risk) * 0.7
 
     gov = (trust + authority) / 2.0
-    x_dir = -1.0 if gov >= 0.5 else 1.0
+    x_bias = _econ_bias(gov, sensitivity, deadzone)  # 连续 X 方向
     conviction = 0.4 + 0.6 * abs(gov - 0.5) * 2.0
-    dx = sx * x_dir * conviction
+    dx = sx * x_bias * conviction
 
     dy = sy * (authority - 0.5) * 2.0
-    dz = sz * -(empathy - 0.5) * 2.0
+
+    # Z 方向 = 双向偏好（自主 − 归属），非硬 empathy 映射
+    indiv_pref = _autonomy_preference(p) - _belonging_need(p)
+    dz = sz * indiv_pref
 
     return (dx * reactivity, dy * reactivity, dz * reactivity)
 
@@ -89,75 +126,36 @@ def _resource_pressure(a: Agent) -> float:
     return 0.6 * p_food + 0.4 * p_money
 
 
-def economic_force_x(a: Agent, cfg: dict) -> float:
-    """X 轴经济驱动（§9）：稀缺 → 亲政府者求管控（x-），反政府者求自由（x+）。"""
-    pol = cfg.get("politics", {})
-    w = pol.get("axis_weights", {}).get("x", 1.0)
-    pressure = _resource_pressure(a)
-    gov = (a.personality["trust"] + a.personality["authority_preference"]) / 2.0
-    econ_dir = -1.0 if gov >= 0.5 else 1.0
-    return pressure * 0.4 * econ_dir * w
-
-
-def authority_force_y(a: Agent, cfg: dict) -> float:
-    """Y 轴权威/合法性驱动（§9）：低政府信任 → 权威轴极化。
-
-    合法性压力 = 0.5 − trust_in_government。信任越低，亲权威者越倾向权威（y+）、
-    反权威者越倾向自由（y-），形成 Y 轴两极分化——而非向中心塌缩。
-    """
-    pol = cfg.get("politics", {})
-    w = pol.get("axis_weights", {}).get("y", 1.0)
-    strength = pol.get("authority_dynamics_strength", 0.03)
-    trust_gov = a.status.get("trust_in_government", 0.5)
-    authority = a.personality["authority_preference"]
-    legitimacy_stress = 0.5 - trust_gov          # 低信任 → 高压力（≈0..0.5）
-    return legitimacy_stress * (authority - 0.5) * 2.0 * strength * w
-
-
-def community_force_z(a: Agent, society, cfg: dict) -> float:
-    """Z 轴集体/个体驱动（§9）：社会联结 → 个人主义，孤立 + 高同理心 → 集体主义。"""
-    pol = cfg.get("politics", {})
-    w = pol.get("axis_weights", {}).get("z", 1.0)
-    strength = pol.get("community_dynamics_strength", 0.02)
-    avg_degree = cfg.get("relationships", {}).get("avg_degree", 6)
-    net = getattr(society, "_network", None)
-    n_friends = len(net.get(a.id, [])) if net else 0
-    isolation = 1.0 - min(1.0, n_friends / max(avg_degree, 1))
-    empathy = a.personality["empathy"]
-    # 联结良好 → 个人主义（z+）；孤立且高同理心 → 集体主义（z-）
-    return ((1.0 - isolation) * 0.5 - isolation * empathy) * strength * w
-
-
-def coupling_force(a: Agent, cfg: dict) -> tuple[float, float, float]:
-    """弱轴耦合（§7）：coupling_force = C_cross × velocity，只取交叉项。
-
-    交叉项保持 |c| < 0.05，避免三轴重新同步（§47）。
-    """
-    c = cfg.get("politics", {}).get("coupling", {})
-    vx, vy, vz = a.political_velocity
-    # 非线性调制（§8）：开放性高的 Agent 耦合更强
-    mod = 0.5 + 0.5 * a.personality["openness"]
-    cx = c.get("xy", 0.0) * vy + c.get("xz", 0.0) * vz
-    cy = c.get("yx", 0.0) * vx + c.get("yz", 0.0) * vz
-    cz = c.get("zx", 0.0) * vx + c.get("zy", 0.0) * vy
-    return (cx * mod, cy * mod, cz * mod)
-
-
 @dataclass(slots=True)
 class ForceParams:
     """每个 tick 从 cfg 预读一次的力参数（避免逐 Agent 重复 dict.get）。"""
 
+    # axis weights
     wx: float
     wy: float
     wz: float
+    # X axis (§4–§7)
+    economic_strength: float
+    sensitivity: float
+    deadzone: float
+    saturation: float
+    # Y axis (§13–§15)
+    authority_strength: float
+    security_strength: float
+    legitimacy_strength: float
+    # Z axis (§8–§12)
+    autonomy_strength: float
+    belonging_strength: float
+    group_pressure_strength: float
+    # shared dynamics
     anchor_strength: float
     center_stability: float
     influence_strength: float
     echo2: float            # echo_threshold^2（平方距离比较，省 sqrt）
     far2: float             # (echo_threshold*2)^2
     noise: float
-    authority_strength: float
-    community_strength: float
+    # coupling (§22)
+    coupling_mode: str      # velocity | state | hybrid
     cxy: float
     cxz: float
     cyx: float
@@ -168,39 +166,66 @@ class ForceParams:
 
 
 def make_force_params(cfg: dict) -> ForceParams:
+    """从配置构造力参数（§37, §38 兼容：旧字段回退）。"""
     pol = cfg.get("politics", {})
     soc_cfg = cfg.get("social", {})
     aw = pol.get("axis_weights", {})
-    coupling = pol.get("coupling", {})
     echo = soc_cfg.get("echo_threshold", 0.4)
+
+    # X axis（§37 新结构，回退到默认连续参数）
+    xc = pol.get("x_axis", {})
+    # Y axis（新结构，回退到旧的 authority_dynamics_strength）
+    yc = pol.get("y_axis", {})
+    yc_authority = yc.get("authority_strength", pol.get("authority_dynamics_strength", 0.03))
+    # Z axis（新结构，回退到旧的 community_dynamics_strength）
+    zc = pol.get("z_axis", {})
+    zc_autonomy = zc.get("autonomy_strength", pol.get("community_dynamics_strength", 0.02))
+
+    # coupling：支持旧 dict（纯交叉项）与新 dict（含 mode）
+    coupling = pol.get("coupling", {})
+    coupling_mode = coupling.get("mode", "velocity") if isinstance(coupling, dict) else "velocity"
+
+    # noise：§24 降到 0.001；支持 float 或 {enabled, strength}
+    noise = pol.get("noise", 0.001)
+    if isinstance(noise, dict):
+        noise = noise.get("strength", 0.001) if noise.get("enabled", True) else 0.0
+
     return ForceParams(
         wx=aw.get("x", 1.0),
         wy=aw.get("y", 1.0),
         wz=aw.get("z", 1.0),
+        economic_strength=xc.get("economic_strength", 0.40),
+        sensitivity=xc.get("sensitivity", 1.0),
+        deadzone=xc.get("deadzone", 0.05),
+        saturation=xc.get("saturation", 1.0),
+        authority_strength=yc_authority,
+        security_strength=yc.get("security_strength", 0.02),
+        legitimacy_strength=yc.get("legitimacy_strength", 0.03),
+        autonomy_strength=zc_autonomy,
+        belonging_strength=zc.get("belonging_strength", 0.02),
+        group_pressure_strength=zc.get("group_pressure_strength", 0.02),
         anchor_strength=pol.get("ideology_anchor_strength", 0.02),
         center_stability=pol.get("center_stability", 0.005),
         influence_strength=soc_cfg.get("influence_strength", pol.get("influence_strength", 0.01)),
         echo2=echo * echo,
         far2=(echo * 2.0) * (echo * 2.0),
-        noise=pol.get("noise", 0.004),
-        authority_strength=pol.get("authority_dynamics_strength", 0.03),
-        community_strength=pol.get("community_dynamics_strength", 0.02),
-        cxy=coupling.get("xy", 0.0),
-        cxz=coupling.get("xz", 0.0),
-        cyx=coupling.get("yx", 0.0),
-        cyz=coupling.get("yz", 0.0),
-        czx=coupling.get("zx", 0.0),
-        czy=coupling.get("zy", 0.0),
+        noise=noise,
+        coupling_mode=coupling_mode,
+        cxy=coupling.get("xy", 0.01),
+        cxz=coupling.get("xz", 0.01),
+        cyx=coupling.get("yx", 0.01),
+        cyz=coupling.get("yz", 0.01),
+        czx=coupling.get("zx", 0.01),
+        czy=coupling.get("zy", 0.01),
         avg_degree=cfg.get("relationships", {}).get("avg_degree", 6),
     )
 
 
 def compute_forces(a: Agent, society, params: ForceParams, rng, pressure: float, build_breakdown: bool = False):
-    """计算单个 Agent 的三轴总力，可选构建力分解 dict（§5，仅在调试/采样时构建）。
+    """计算单个 Agent 的三轴总力（v0.3.1 校准公式）。
 
-    热路径返回 (total_tuple, None)，避免每 tick 分配 dict；build_breakdown=True
-    时返回 (total_tuple, breakdown_dict)。参数经 ForceParams 预读，避免逐 Agent
-    重复 cfg.get。
+    热路径返回 (total_tuple, None)；build_breakdown=True 时返回
+    (total_tuple, breakdown_dict)。参数经 ForceParams 预读。
     """
     p = a.personality
     trust = p["trust"]
@@ -213,34 +238,58 @@ def compute_forces(a: Agent, society, params: ForceParams, rng, pressure: float,
     net = getattr(society, "_network", None)
     agent_map = society.agent_map()
 
-    # X：经济驱动（稀缺 → 亲政府求管控，反政府求自由）
-    fx_eco = pressure * 0.4 * (-1.0 if gov >= 0.5 else 1.0) * params.wx
+    # Z 双向偏好（§9）：autonomy_preference vs belonging_need
+    autonomy_pref = _autonomy_preference(p)
+    belonging_need = _belonging_need(p)
+    indiv_pref = autonomy_pref - belonging_need  # [-1, +1]
 
-    # Y：权威/合法性驱动（低信任 → 权威轴极化）
+    # ---- X：连续经济驱动（§4–§7） ----------------------------------------
+    econ_bias = _econ_bias(gov, params.sensitivity, params.deadzone)
+    fx_eco = _pressure_response(pressure, params.saturation) * params.economic_strength * econ_bias * params.wx
+
+    # ---- Y：多驱动（§13–§15） ---------------------------------------------
     trust_gov = a.status.get("trust_in_government", 0.5)
-    fy_auth = (0.5 - trust_gov) * (authority - 0.5) * 2.0 * params.authority_strength * params.wy
+    legitimacy_stress = 0.5 - trust_gov  # 低信任 → 合法性压力
 
-    # Z：社区/联结驱动（联结→个人主义，孤立且高同理心→集体主义）
+    # ---- Z：双向偏好（§8–§12） ---------------------------------------------
     n_friends = len(net.get(a.id, [])) if net else 0
     isolation = 1.0 - min(1.0, n_friends / params.avg_degree) if params.avg_degree > 1 else 0.0
-    fz_comm = ((1.0 - isolation) * 0.5 - isolation * empathy) * params.community_strength * params.wz
+    connectedness = 1.0 - isolation
 
-    # 事件压力（内联 interpret_event，避免逐事件重复读 personality）
+    # 自主 → Z+，归属 → Z-（方向由偏好决定，联结只调制幅度，非单向）
+    fz_comm = (autonomy_pref * params.autonomy_strength - belonging_need * params.belonging_strength) * params.wz
+    fz_comm *= (1.0 + params.group_pressure_strength * connectedness)
+
+    # ---- 事件压力（连续 X + 双向 Z + Y 信号） -----------------------------
     reactivity = 0.3 + (1.0 - risk) * 0.7
-    x_dir = -1.0 if gov >= 0.5 else 1.0
     conviction = 0.4 + 0.6 * abs(gov - 0.5) * 2.0
     dy_factor = (authority - 0.5) * 2.0
-    dz_factor = -(empathy - 0.5) * 2.0
+    security_signal = 0.0
+    institutional_signal = 0.0
     fx_ev = fy_ev = fz_ev = 0.0
     for m in a.recent_events:
-        sx, sy, sz = EVENT_SALIENCE.get(m["type"], _DEFAULT_SALIENCE)
+        etype = m["type"]
         s = m.get("strength", 0.0)
-        fx_ev += sx * x_dir * conviction * reactivity * s
+        sx, sy, sz = EVENT_SALIENCE.get(etype, _DEFAULT_SALIENCE)
+        fx_ev += sx * econ_bias * conviction * reactivity * s
         fy_ev += sy * dy_factor * reactivity * s
-        fz_ev += sz * dz_factor * reactivity * s
+        fz_ev += sz * indiv_pref * reactivity * s
+        # Y 独立信号（§13, §14）
+        if etype in _SECURITY_EVENTS:
+            security_signal += sy * s
+        elif etype in _INSTITUTIONAL_EVENTS:
+            institutional_signal += sy * s
 
-    # 社会影响（弱，回音室；平方距离比较，省 sqrt）
+    # Y 总权威力（legitimacy + security + institutional，个体方向调制）
+    fy_auth = (
+        legitimacy_stress * params.authority_strength
+        + security_signal * params.security_strength
+        + institutional_signal * params.legitimacy_strength
+    ) * dy_factor * params.wy
+
+    # ---- 社会影响（弱，回音室；平方距离比较，省 sqrt） --------------------
     fx_soc = fy_soc = fz_soc = 0.0
+    fz_group = 0.0
     if net and params.influence_strength > 0:
         nbrs = net.get(a.id)
         if nbrs:
@@ -276,34 +325,52 @@ def compute_forces(a: Agent, society, params: ForceParams, rng, pressure: float,
                 fx_soc = (ax_soc / wsum - ix) * params.influence_strength
                 fy_soc = (ay_soc / wsum - iy) * params.influence_strength
                 fz_soc = (az_soc / wsum - iz) * params.influence_strength
+                # Z group pressure（§9）：归属需求强 → 顺从邻居 Z 均值
+                fz_group = params.group_pressure_strength * belonging_need * (az_soc / wsum - iz) * params.wz
 
-    # 个人锚点
+    # 社区力 = 个人偏好 + 群体压力（合并计入 breakdown 的 community 源）
+    fz_community = fz_comm + fz_group
+
+    # ---- 个人锚点 ----------------------------------------------------------
     ax, ay, az = a.ideology_anchor
     fx_anchor = (ax - a.ideology.x) * params.anchor_strength
     fy_anchor = (ay - a.ideology.y) * params.anchor_strength
     fz_anchor = (az - a.ideology.z) * params.anchor_strength
 
-    # 中心稳定力
+    # ---- 中心稳定力 --------------------------------------------------------
     fx_center = -a.ideology.x * params.center_stability
     fy_center = -a.ideology.y * params.center_stability
     fz_center = -a.ideology.z * params.center_stability
 
-    # 弱轴耦合
+    # ---- 弱轴耦合（§22：velocity | state | hybrid） ------------------------
     vx, vy, vz = a.political_velocity
     mod = 0.5 + 0.5 * openness
-    fx_coup = (params.cxy * vy + params.cxz * vz) * mod
-    fy_coup = (params.cyx * vx + params.cyz * vz) * mod
-    fz_coup = (params.czx * vx + params.czy * vy) * mod
+    mode = params.coupling_mode
+    if mode == "state":
+        fx_coup = (params.cxy * a.ideology.y + params.cxz * a.ideology.z) * mod
+        fy_coup = (params.cyx * a.ideology.x + params.cyz * a.ideology.z) * mod
+        fz_coup = (params.czx * a.ideology.x + params.czy * a.ideology.y) * mod
+    elif mode == "hybrid":
+        fx_coup = (params.cxy * (vy + a.ideology.y) + params.cxz * (vz + a.ideology.z)) * mod
+        fy_coup = (params.cyx * (vx + a.ideology.x) + params.cyz * (vz + a.ideology.z)) * mod
+        fz_coup = (params.czx * (vx + a.ideology.x) + params.czy * (vy + a.ideology.y)) * mod
+    else:  # velocity
+        fx_coup = (params.cxy * vy + params.cxz * vz) * mod
+        fy_coup = (params.cyx * vx + params.cyz * vz) * mod
+        fz_coup = (params.czx * vx + params.czy * vy) * mod
 
-    # 微小随机波动
+    # ---- 微小随机波动（§24：noise << systematic，非伪造） ------------------
     n = params.noise
-    fx_noise = rng.uniform(-n, n)
-    fy_noise = rng.uniform(-n, n)
-    fz_noise = rng.uniform(-n, n)
+    if n > 0:
+        fx_noise = rng.uniform(-n, n)
+        fy_noise = rng.uniform(-n, n)
+        fz_noise = rng.uniform(-n, n)
+    else:
+        fx_noise = fy_noise = fz_noise = 0.0
 
     tx = fx_eco + fx_ev + fx_soc + fx_anchor + fx_center + fx_coup + fx_noise
     ty = fy_auth + fy_ev + fy_soc + fy_anchor + fy_center + fy_coup + fy_noise
-    tz = fz_comm + fz_ev + fz_soc + fz_anchor + fz_center + fz_coup + fz_noise
+    tz = fz_community + fz_ev + fz_soc + fz_anchor + fz_center + fz_coup + fz_noise
 
     if not build_breakdown:
         return (tx, ty, tz), None
@@ -315,7 +382,7 @@ def compute_forces(a: Agent, society, params: ForceParams, rng, pressure: float,
         "y": {"economic": 0.0, "authority": fy_auth, "community": 0.0, "event": fy_ev,
               "social": fy_soc, "anchor": fy_anchor, "center": fy_center,
               "coupling": fy_coup, "noise": fy_noise},
-        "z": {"economic": 0.0, "authority": 0.0, "community": fz_comm, "event": fz_ev,
+        "z": {"economic": 0.0, "authority": 0.0, "community": fz_community, "event": fz_ev,
               "social": fz_soc, "anchor": fz_anchor, "center": fz_center,
               "coupling": fz_coup, "noise": fz_noise},
     }

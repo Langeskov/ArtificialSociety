@@ -329,6 +329,7 @@
     if (state.currentTab === 'graph') { renderGraph(); return; }
     if (state.currentTab === 'distribution') { renderDistribution(); return; }
     if (state.currentTab === 'clusters') { renderClusters(); return; }
+    if (state.currentTab === 'dynamics') { renderDynamics(); return; }
     const el = $('timeline-list');
     const evs = state.events.slice().reverse();
     el.innerHTML = evs.length
@@ -446,6 +447,40 @@
             <span class="etype">人口 ${(c.ratio * 100).toFixed(0)}%</span>
             <span class="sev">中心 (${c.center[0]}, ${c.center[1]}, ${c.center[2]})</span>
           </div>`).join('');
+      })
+      .catch(() => { el.innerHTML = '<div style="color:var(--muted)">加载失败</div>'; });
+  }
+
+  function renderDynamics() {
+    if (!state.societyId) return;
+    const el = $('timeline-list');
+    el.innerHTML = '<div style="color:var(--muted)">加载中…</div>';
+    api(`/api/society/${state.societyId}/dynamics`)
+      .then((d) => {
+        const mean = d.mean, vel = d.velocity, pol = d.polarization, bd = d.boundaries, sh = d.shapes, fb = d.force_budget_percent;
+        const fmt = (v) => (v === undefined || v === null) ? '—' : (v > 0 ? '+' : '') + (Number(v).toFixed(4));
+        const row = (k, v) => `<div class="kv"><span class="k">${k}</span><span>${v}</span></div>`;
+        let html = '<div class="section-title">动力学诊断（v0.3.1）</div>';
+        html += row('主导轴（force/velocity）', d.dominance_force || '—');
+        html += row('X/Y/Z 漂移', `${fmt(vel.x_drift)} / ${fmt(vel.y_drift)} / ${fmt(vel.z_drift)}`);
+        html += row('X/Y/Z 均值', `${Number(mean.x_mean).toFixed(3)} / ${Number(mean.y_mean).toFixed(3)} / ${Number(mean.z_mean).toFixed(3)}`);
+        html += '<div class="section-title">方差</div>';
+        html += row('X / Y / Z', `${pol.x_variance} / ${pol.y_variance} / ${pol.z_variance}`);
+        html += '<div class="section-title">极化</div>';
+        html += row('X / Y / Z', `${pol.x_polarization} / ${pol.y_polarization} / ${pol.z_polarization}`);
+        html += '<div class="section-title">分布形态</div>';
+        html += row('X / Y / Z', `${sh.x_shape} / ${sh.y_shape} / ${sh.z_shape}`);
+        html += '<div class="section-title">边界集中（六方向）</div>';
+        html += row('X− / X+', `${(bd.x_neg * 100).toFixed(1)}% / ${(bd.x_pos * 100).toFixed(1)}%`);
+        html += row('Y− / Y+', `${(bd.y_neg * 100).toFixed(1)}% / ${(bd.y_pos * 100).toFixed(1)}%`);
+        html += row('Z− / Z+', `${(bd.z_neg * 100).toFixed(1)}% / ${(bd.z_pos * 100).toFixed(1)}%`);
+        html += '<div class="section-title">力预算（各来源占比）</div>';
+        const names = { economic: '经济', authority: '权威', community: '社区', event: '事件', social: '社会', anchor: '锚点', center: '中心', coupling: '耦合', noise: '噪声' };
+        for (const ax of ['x', 'y', 'z']) {
+          const parts = Object.entries(fb[ax] || {}).filter(([, v]) => v > 0.5).map(([s, v]) => `${names[s] || s} ${v}%`).join(' · ');
+          html += row(ax.toUpperCase(), parts || '—');
+        }
+        el.innerHTML = html;
       })
       .catch(() => { el.innerHTML = '<div style="color:var(--muted)">加载失败</div>'; });
   }

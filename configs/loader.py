@@ -69,12 +69,16 @@ def default_society_config() -> dict:
             "ideology_anchor_strength": 0.02,
             "max_movement_per_tick": 0.03,
             "extremism_threshold": 0.7,
-            "noise": 0.004,
+            "noise": 0.001,
             # v0.3: 三轴独立驱动力 + 弱耦合 (§7, §8, §9)
-            "authority_dynamics_strength": 0.03,
-            "community_dynamics_strength": 0.02,
+            "authority_dynamics_strength": 0.03,   # 旧字段，向后兼容
+            "community_dynamics_strength": 0.02,   # 旧字段，向后兼容
             "axis_weights": {"x": 1.0, "y": 1.0, "z": 1.0},
-            "coupling": {"xy": 0.03, "xz": -0.02, "yx": 0.02, "yz": 0.03, "zx": -0.02, "zy": 0.02},
+            # v0.3.1: 三轴独立校准参数 (§37)
+            "x_axis": {"economic_strength": 0.40, "sensitivity": 1.0, "deadzone": 0.05, "saturation": 1.0},
+            "y_axis": {"authority_strength": 0.03, "security_strength": 0.02, "legitimacy_strength": 0.03},
+            "z_axis": {"autonomy_strength": 0.02, "belonging_strength": 0.02, "group_pressure_strength": 0.02},
+            "coupling": {"mode": "velocity", "xy": 0.03, "xz": -0.02, "yx": 0.02, "yz": 0.03, "zx": -0.02, "zy": 0.02},
         },
         "social": {
             # v0.2: information propagation + memory (§19, §20, §21, §22, §23)

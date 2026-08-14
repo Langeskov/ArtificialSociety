@@ -17,6 +17,11 @@ from ..politics.observability import (  # noqa: F401
     polarization_per_axis,
     axis_correlation,
     detect_axis_dominance,
+    axis_mean,
+    axis_velocity,
+    boundary_per_direction,
+    classify_axes,
+    axis_dominance_force,
 )
 
 
@@ -205,6 +210,13 @@ def compute_metrics(agents: Sequence[Agent], events, tick: int, cfg: dict | None
     corr = axis_correlation(alive)
     dominance = detect_axis_dominance(alive, cfg.get("stability", {}).get("collapse_variance_threshold", 0.02))
 
+    # v0.3.1: mean / drift / per-direction boundary / shape / force-dominance (§16–§21, §30–§32)
+    means = axis_mean(alive)
+    vel = axis_velocity(alive)
+    bounds = boundary_per_direction(alive)
+    shapes = classify_axes(alive)
+    dom_force = axis_dominance_force(alive)
+
     return {
         "tick": tick,
         "population": n,
@@ -244,4 +256,13 @@ def compute_metrics(agents: Sequence[Agent], events, tick: int, cfg: dict | None
         "axis_correlation_xz": corr["xz"],
         "axis_correlation_yz": corr["yz"],
         "axis_dominance": dominance,
+        # v0.3.1: mean / drift / boundary / shape / force-dominance
+        "x_mean": means["x_mean"], "y_mean": means["y_mean"], "z_mean": means["z_mean"],
+        "x_drift": vel["x_drift"], "y_drift": vel["y_drift"], "z_drift": vel["z_drift"],
+        "x_abs_velocity": vel["x_abs_velocity"], "y_abs_velocity": vel["y_abs_velocity"], "z_abs_velocity": vel["z_abs_velocity"],
+        "boundary_x_neg": bounds["x_neg"], "boundary_x_pos": bounds["x_pos"],
+        "boundary_y_neg": bounds["y_neg"], "boundary_y_pos": bounds["y_pos"],
+        "boundary_z_neg": bounds["z_neg"], "boundary_z_pos": bounds["z_pos"],
+        "x_shape": shapes["x_shape"], "y_shape": shapes["y_shape"], "z_shape": shapes["z_shape"],
+        "axis_dominance_force": dom_force,
     }

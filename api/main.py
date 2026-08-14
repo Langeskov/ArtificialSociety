@@ -353,6 +353,87 @@ def society_politics_attractors(society_id: str):
 
 
 # --------------------------------------------------------------------------
+# v0.3.1: dynamics diagnostics endpoints (§39)
+# --------------------------------------------------------------------------
+def _get_society(society_id: str):
+    s = engine.get(society_id)
+    if s is None:
+        raise HTTPException(404, "society not found")
+    return s
+
+
+@app.get("/api/society/{society_id}/dynamics")
+def society_dynamics(society_id: str):
+    """动力学诊断总览（§29）：mean / drift / variance / polarization / correlation / boundary / force / dominance。"""
+    from engine.politics.observability import (
+        axis_mean, axis_velocity, polarization_per_axis, axis_correlation,
+        boundary_per_direction, classify_axes, axis_dominance_force, force_budget_percent,
+    )
+    s = _get_society(society_id)
+    return {
+        "mean": axis_mean(s.agents),
+        "velocity": axis_velocity(s.agents),
+        "polarization": polarization_per_axis(s.agents),
+        "correlation": axis_correlation(s.agents),
+        "boundaries": boundary_per_direction(s.agents),
+        "shapes": classify_axes(s.agents),
+        "dominance_force": axis_dominance_force(s.agents),
+        "force_budget_percent": force_budget_percent(s.agents),
+    }
+
+
+@app.get("/api/society/{society_id}/dynamics/forces")
+def society_dynamics_forces(society_id: str):
+    """人口级力预算（§16, §28）。"""
+    from engine.politics.observability import force_budget, force_budget_percent
+    s = _get_society(society_id)
+    return {"budget": force_budget(s.agents), "percent": force_budget_percent(s.agents)}
+
+
+@app.get("/api/society/{society_id}/dynamics/drift")
+def society_dynamics_drift(society_id: str):
+    """轴漂移（§18）。"""
+    from engine.politics.observability import axis_velocity
+    s = _get_society(society_id)
+    return axis_velocity(s.agents)
+
+
+@app.get("/api/society/{society_id}/dynamics/variance")
+def society_dynamics_variance(society_id: str):
+    """轴方差（§19）：当前值 + 历史演化（dVar/dt）。"""
+    from engine.politics.observability import polarization_per_axis
+    s = _get_society(society_id)
+    pol = polarization_per_axis(s.agents)
+    # 从 metrics_history 计算方差演化
+    hist = s.metrics_history[-50:]
+    evol = []
+    for m in hist:
+        evol.append({
+            "tick": m.get("tick", 0),
+            "x_var": m.get("political_variance_x", 0.0),
+            "y_var": m.get("political_variance_y", 0.0),
+            "z_var": m.get("political_variance_z", 0.0),
+        })
+    return {"current": {"x": pol["x_variance"], "y": pol["y_variance"], "z": pol["z_variance"]}, "evolution": evol}
+
+
+@app.get("/api/society/{society_id}/dynamics/correlation")
+def society_dynamics_correlation(society_id: str):
+    """轴相关矩阵（§21）。"""
+    from engine.politics.observability import axis_correlation
+    s = _get_society(society_id)
+    return axis_correlation(s.agents)
+
+
+@app.get("/api/society/{society_id}/dynamics/boundaries")
+def society_dynamics_boundaries(society_id: str):
+    """六方向边界集中（§30）。"""
+    from engine.politics.observability import boundary_per_direction
+    s = _get_society(society_id)
+    return boundary_per_direction(s.agents)
+
+
+# --------------------------------------------------------------------------
 # Agent endpoints
 # --------------------------------------------------------------------------
 @app.get("/api/agent/{agent_id}")

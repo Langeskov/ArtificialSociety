@@ -190,3 +190,138 @@ def distribution_histogram(agents: Sequence[Agent], axis: str = "x", bins: int =
         "bins": [round(lo + i * width, 3) for i in range(bins)],
         "counts": counts,
     }
+
+
+# ---------------------------------------------------------------------------
+# v0.3.1 校准诊断（§16–§21, §30–§32）
+# ---------------------------------------------------------------------------
+
+def axis_mean(agents: Sequence[Agent]) -> dict:
+    """三轴均值（§20）：区分「整体漂移」与「极化」。"""
+    alive = [a for a in agents if a.alive]
+    n = len(alive)
+    if n == 0:
+        return {"x_mean": 0.0, "y_mean": 0.0, "z_mean": 0.0}
+    return {
+        "x_mean": round(sum(a.ideology.x for a in alive) / n, 6),
+        "y_mean": round(sum(a.ideology.y for a in alive) / n, 6),
+        "z_mean": round(sum(a.ideology.z for a in alive) / n, 6),
+    }
+
+
+def axis_velocity(agents: Sequence[Agent]) -> dict:
+    """三轴平均速度 / 平均绝对速度（§18 漂移检测）。"""
+    alive = [a for a in agents if a.alive]
+    n = len(alive)
+    if n == 0:
+        return {
+            "x_drift": 0.0, "y_drift": 0.0, "z_drift": 0.0,
+            "x_abs_velocity": 0.0, "y_abs_velocity": 0.0, "z_abs_velocity": 0.0,
+        }
+    vx = sum(a.political_velocity[0] for a in alive) / n
+    vy = sum(a.political_velocity[1] for a in alive) / n
+    vz = sum(a.political_velocity[2] for a in alive) / n
+    ax_ = sum(abs(a.political_velocity[0]) for a in alive) / n
+    ay_ = sum(abs(a.political_velocity[1]) for a in alive) / n
+    az_ = sum(abs(a.political_velocity[2]) for a in alive) / n
+    return {
+        "x_drift": round(vx, 6), "y_drift": round(vy, 6), "z_drift": round(vz, 6),
+        "x_abs_velocity": round(ax_, 6), "y_abs_velocity": round(ay_, 6), "z_abs_velocity": round(az_, 6),
+    }
+
+
+def boundary_per_direction(agents: Sequence[Agent], threshold: float = 0.9) -> dict:
+    """六方向边界集中（§30）：每个边界人口占比，而非「靠近任意边界」。"""
+    alive = [a for a in agents if a.alive]
+    n = len(alive)
+    if n == 0:
+        return {k: 0.0 for k in ("x_neg", "x_pos", "y_neg", "y_pos", "z_neg", "z_pos")}
+    r = lambda cond: sum(1 for a in alive if cond(a)) / n
+    return {
+        "x_neg": round(r(lambda a: a.ideology.x < -threshold), 4),
+        "x_pos": round(r(lambda a: a.ideology.x > threshold), 4),
+        "y_neg": round(r(lambda a: a.ideology.y < -threshold), 4),
+        "y_pos": round(r(lambda a: a.ideology.y > threshold), 4),
+        "z_neg": round(r(lambda a: a.ideology.z < -threshold), 4),
+        "z_pos": round(r(lambda a: a.ideology.z > threshold), 4),
+    }
+
+
+def classify_distribution(vals: list[float], boundary_threshold: float = 0.9) -> str:
+    """分布形态分类（§31）：single_peak / two_peak / multi_peak / boundary_accumulation / uniform。"""
+    n = len(vals)
+    if n == 0:
+        return "empty"
+    # 边界累积：大量人口压在边界
+    boundary_ratio = sum(1 for v in vals if abs(v) > boundary_threshold) / n
+    if boundary_ratio > 0.3:
+        return "boundary_accumulation"
+    bc = _bimodality_coefficient(vals)
+    if bc > 0.8:
+        return "two_peak"
+    if bc > 0.6:
+        return "multi_peak"
+    # 均匀：std 接近均匀分布 0.577 且低双峰
+    s = _std(vals)
+    if s > 0.45 and bc < 0.55:
+        return "uniform"
+    return "single_peak"
+
+
+def classify_axes(agents: Sequence[Agent]) -> dict:
+    """三轴分布形态（§31）。"""
+    alive = [a for a in agents if a.alive]
+    return {
+        "x_shape": classify_distribution([a.ideology.x for a in alive]),
+        "y_shape": classify_distribution([a.ideology.y for a in alive]),
+        "z_shape": classify_distribution([a.ideology.z for a in alive]),
+    }
+
+
+def axis_dominance_force(agents: Sequence[Agent], ratio: float = 1.6) -> str:
+    """基于力/速度的主导轴检测（§17）：X_DOMINANT / Y_DOMINANT / Z_DOMINANT / BALANCED。
+
+    用平均绝对速度（真实运动）判断，而非只依据坐标方差（§19 区分平移与极化）。
+    """
+    v = axis_velocity(agents)
+    mags = [v["x_abs_velocity"], v["y_abs_velocity"], v["z_abs_velocity"]]
+    total = sum(mags)
+    if total < 1e-6:
+        return "BALANCED"
+    shares = [m / total for m in mags]
+    mx = max(shares)
+    if mx < 0.5:
+        return "BALANCED"
+    # 最强轴是否显著超过次强轴
+    ordered = sorted(shares, reverse=True)
+    if ordered[0] > ordered[1] * ratio and ordered[0] > 0.45:
+        idx = shares.index(ordered[0])
+        return ("X_DOMINANT", "Y_DOMINANT", "Z_DOMINANT")[idx]
+    return "BALANCED"
+
+
+def force_budget(agents: Sequence[Agent]) -> dict:
+    """人口级力预算（§16, §28）：各来源在三轴的平均绝对贡献。"""
+    sources = ("economic", "authority", "community", "event", "social", "anchor", "center", "coupling", "noise")
+    sums = {ax: {src: 0.0 for src in sources} for ax in "xyz"}
+    count = 0
+    for a in agents:
+        if not a.alive or not a.last_forces:
+            continue
+        count += 1
+        for ax in "xyz":
+            for src in sources:
+                sums[ax][src] += abs(a.last_forces[ax].get(src, 0.0))
+    if count == 0:
+        return {ax: {src: 0.0 for src in sources} for ax in "xyz"}
+    return {ax: {src: round(sums[ax][src] / count, 6) for src in sources} for ax in "xyz"}
+
+
+def force_budget_percent(agents: Sequence[Agent]) -> dict:
+    """力预算百分比（§28）：各来源占该轴总力比例。"""
+    budget = force_budget(agents)
+    pct = {}
+    for ax in "xyz":
+        total = sum(budget[ax].values())
+        pct[ax] = {src: round(budget[ax][src] / total * 100, 1) if total > 0 else 0.0 for src in budget[ax]}
+    return pct

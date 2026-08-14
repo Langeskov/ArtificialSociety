@@ -90,6 +90,24 @@ uv pip install --python .venv/Scripts/python.exe `
 .\.venv\Scripts\python.exe scripts\longrun_report.py   # 长跑报告
 ```
 
+## v0.3.1 政治动力学校准（Political Dynamics Calibration）
+
+修复了 v0.3 长跑稳定复现的三类动力学异常（见 `docs/v0.3.1_calibration_report.md`）：
+
+| 异常 | 根因 | v0.3.1 修复 |
+|---|---|---|
+| X 轴双峰/两极 | `econ_dir = -1 if gov≥0.5 else +1` 二值分类器 | 连续 `econ_bias = tanh((0.5−gov)·sensitivity)` + deadzone + saturation |
+| Z 轴永久 Z+ 漂移 | `(1−isolation)·0.5` 恒正，联结→Z+ | 双向偏好 `autonomy_pref − belonging_need` + group_pressure |
+| Y 轴弱动力 | 仅 trust_in_government 驱动，强度 0.03 | 多驱动：legitimacy + security(冲突) + institutional(制度绩效) |
+
+新增：力预算（人口级各来源占比）、轴漂移/方差/均值三指标、六方向边界集中、
+分布形态分类、force/velocity 主导轴检测、`/api/society/{id}/dynamics*` 端点。
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_political_calibration.py -v   # 12 个校准测试
+.\.venv\Scripts\python.exe scripts\calibrate.py --days 100 --seeds 3          # 校准矩阵
+```
+
 ## 系统架构（六层）
 
 ```

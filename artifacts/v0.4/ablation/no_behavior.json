@@ -1,0 +1,44 @@
+[
+  {
+    "active_group_count": 5,
+    "avg_group_size": 45.2,
+    "identity_strength": 0.5060151577314493,
+    "fragmentation": 0.3819,
+    "integration": 0.3507,
+    "information_count": 16,
+    "cascade_count": 0,
+    "x_polarization": 0.8895,
+    "y_polarization": 0.7013,
+    "z_polarization": 0.4642,
+    "scenario": "no_behavior",
+    "seed": 0
+  },
+  {
+    "active_group_count": 5,
+    "avg_group_size": 41.4,
+    "identity_strength": 0.4644337417791155,
+    "fragmentation": 0.3795,
+    "integration": 0.3812,
+    "information_count": 9,
+    "cascade_count": 0,
+    "x_polarization": 0.645,
+    "y_polarization": 0.6461,
+    "z_polarization": 0.4537,
+    "scenario": "no_behavior",
+    "seed": 1
+  },
+  {
+    "active_group_count": 5,
+    "avg_group_size": 45.2,
+    "identity_strength": 0.5066216062730798,
+    "fragmentation": 0.3831,
+    "integration": 0.3655,
+    "information_count": 11,
+    "cascade_count": 0,
+    "x_polarization": 0.8708,
+    "y_polarization": 0.6026,
+    "z_polarization": 0.4529,
+    "scenario": "no_behavior",
+    "seed": 2
+  }
+]

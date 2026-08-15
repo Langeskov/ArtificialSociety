@@ -99,6 +99,10 @@ class TestRecovery(unittest.TestCase):
 
     def test_temperature_recovers_after_crisis(self):
         eng, s = make_engine(seed=7)
+        # v0.4: 关闭行为/群体/身份/信息系统，隔离测试 v0.3.1 危机-恢复动力学
+        # （v0.4 的 trade 行为提供食物安全网，会合法减弱危机峰值）
+        for key in ("behavior", "groups", "identity", "information"):
+            s.config.setdefault(key, {})["enabled"] = False
         run(eng, s, 200)
         eng.inject_event(s.society_id, "natural_disaster", severity=0.7)
         temps = []

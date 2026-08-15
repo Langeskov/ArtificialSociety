@@ -13,6 +13,7 @@ from typing import Optional
 from .personality import Personality
 from .ideology import Ideology
 from .resources import Resources
+from ..identity.identity import Identity
 
 
 @dataclass
@@ -35,6 +36,10 @@ class Agent:
     known_events: dict = field(default_factory=dict)     # event_id -> tick the agent learned it
     ideology_anchor: tuple = field(default_factory=lambda: (0.0, 0.0, 0.0))  # 个人政治锚点
     last_forces: dict = field(default_factory=dict)       # v0.3: 最近一次力分解（可解释性 §5）
+    # v0.4 social layer (§14–§24, §47)
+    identity: Identity = field(default_factory=Identity)  # 社会身份（≠ ideology §14）
+    location: str = "A"                                    # region_id（§47）
+    beliefs: dict = field(default_factory=dict)            # subject -> Belief（§28）
 
     def __post_init__(self) -> None:
         self.status.setdefault("anger", 0.0)
@@ -75,6 +80,10 @@ class Agent:
             "political_velocity": [round(v, 5) for v in self.political_velocity],
             "recent_events": list(self.recent_events),
             "forces": self.last_forces,  # v0.3: 力分解（可解释性 §5, §37）
+            # v0.4: 社会身份（§59）
+            "identity": self.identity.as_dict(),
+            "location": self.location,
+            "beliefs": {k: v.as_dict() for k, v in self.beliefs.items()},
         }
 
     def brief(self) -> dict:
@@ -92,6 +101,10 @@ class Agent:
             "group": self.group,
             "alive": self.alive,
             "anger": round(self.status.get("anger", 0.0), 3),
+            # v0.4: 群体归属（§58 group layer）
+            "primary_group": self.identity.primary_group,
+            "group_count": self.identity.membership_count(),
+            "location": self.location,
             # v0.2: 政治速度向量，用于 3D 视图的移动方向可视化 (§28, §29)
             "vx": round(self.political_velocity[0], 5),
             "vy": round(self.political_velocity[1], 5),

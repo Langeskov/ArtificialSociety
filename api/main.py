@@ -258,14 +258,11 @@ def society_agents(society_id: str, brief: bool = True, limit: int = 5000):
 
 @app.get("/api/society/{society_id}/groups")
 def society_groups(society_id: str):
+    """群体列表（v0.4 §71）：由行为涌现的 Group，而非 ideology 标签（§1 禁止 ideology=group）。"""
     s = engine.get(society_id)
     if s is None:
         raise HTTPException(404, "society not found")
-    groups = {}
-    for a in s.agents:
-        g = a.group or a.ideology.origin_label
-        groups.setdefault(g, []).append(a.id)
-    return {"groups": [{"group": g, "members": m, "size": len(m)} for g, m in groups.items()]}
+    return {"groups": s.groups.as_list(), "history": s.groups.history[-100:]}
 
 
 @app.get("/api/society/{society_id}/events")
@@ -431,6 +428,150 @@ def society_dynamics_boundaries(society_id: str):
     from engine.politics.observability import boundary_per_direction
     s = _get_society(society_id)
     return boundary_per_direction(s.agents)
+
+
+# --------------------------------------------------------------------------
+# v0.4: groups / identity / information / social-dynamics endpoints (§71)
+# --------------------------------------------------------------------------
+@app.get("/api/group/{group_id}")
+def group_detail(group_id: str, society_id: str):
+    """单个群体详情（§58）。"""
+    s = _get_society(society_id)
+    g = s.groups.get(group_id)
+    if g is None:
+        raise HTTPException(404, "group not found")
+    d = g.as_dict()
+    d["members"] = sorted(g.members)
+    return d
+
+
+@app.get("/api/group/{group_id}/members")
+def group_members(group_id: str, society_id: str):
+    """群体成员列表（§71）。"""
+    s = _get_society(society_id)
+    g = s.groups.get(group_id)
+    if g is None:
+        raise HTTPException(404, "group not found")
+    members = [s.get_agent(mid).brief() for mid in sorted(g.members) if s.get_agent(mid)]
+    return {"group_id": group_id, "members": members}
+
+
+@app.get("/api/agent/{agent_id}/identity")
+def agent_identity(agent_id: str, society_id: str):
+    """Agent 身份（§59）。"""
+    s = _get_society(society_id)
+    a = s.get_agent(agent_id)
+    if a is None:
+        raise HTTPException(404, "agent not found")
+    return a.identity.as_dict()
+
+
+@app.get("/api/society/{society_id}/information")
+def society_information(society_id: str):
+    """信息消息列表（§71）。"""
+    s = _get_society(society_id)
+    msgs = getattr(s, "information_messages", [])
+    return {"information": [m.as_dict() for m in msgs[-200:]]}
+
+
+@app.get("/api/information/{info_id}")
+def information_detail(info_id: str, society_id: str):
+    """单条信息详情（§60）。"""
+    s = _get_society(society_id)
+    for m in getattr(s, "information_messages", []):
+        if m.id == info_id:
+            return m.as_dict()
+    raise HTTPException(404, "information not found")
+
+
+@app.get("/api/information/{info_id}/propagation")
+def information_propagation(info_id: str, society_id: str):
+    """信息传播路径（§60, §61）。"""
+    s = _get_society(society_id)
+    for m in getattr(s, "information_messages", []):
+        if m.id == info_id:
+            return {"id": info_id, "chain": m.propagation_chain, "reach": m.reach}
+    raise HTTPException(404, "information not found")
+
+
+@app.get("/api/society/{society_id}/beliefs")
+def society_beliefs(society_id: str):
+    """信念分布（§60）。"""
+    s = _get_society(society_id)
+    subjects: dict[str, list[float]] = {}
+    for a in s.agents:
+        if not a.alive:
+            continue
+        for subj, b in getattr(a, "beliefs", {}).items():
+            subjects.setdefault(subj, []).append(round(b.belief_strength, 4))
+    result = {}
+    for subj, vals in subjects.items():
+        n = len(vals)
+        result[subj] = {
+            "count": n,
+            "believe": round(sum(1 for v in vals if v > 0.3) / n * 100, 1) if n else 0,
+            "neutral": round(sum(1 for v in vals if -0.3 <= v <= 0.3) / n * 100, 1) if n else 0,
+            "reject": round(sum(1 for v in vals if v < -0.3) / n * 100, 1) if n else 0,
+        }
+    return result
+
+
+@app.get("/api/society/{society_id}/social-dynamics")
+def society_social_dynamics(society_id: str):
+    """社会动力学总览（§55, §75–§78）。"""
+    from engine.metrics.social_metrics import (
+        group_metrics, identity_metrics, information_metrics, fragmentation_score, integration_score,
+    )
+    s = _get_society(society_id)
+    return {
+        "social_state": s.social_state,
+        "groups": group_metrics(s),
+        "identity": identity_metrics(s),
+        "information": information_metrics(s),
+        "fragmentation": fragmentation_score(s),
+        "integration": integration_score(s),
+    }
+
+
+@app.post("/api/experiment/ablation")
+def experiment_ablation(body: dict):
+    """消融实验（§66, §67）：分别关闭 groups/identity/information/behavior 运行。"""
+    from configs.loader import default_society_config
+    agents = body.get("agents", 500)
+    days = body.get("days", 50)
+    seed = body.get("seed", 42)
+    ablations = body.get("ablations", ["none", "no_groups", "no_identity", "no_information", "no_behavior"])
+
+    def run_ablation(disable: list):
+        cfg = default_society_config()
+        cfg["population"]["count"] = agents
+        for key in disable:
+            cfg.setdefault(key, {})["enabled"] = False
+        e = SimulationEngine()
+        s = e.create_society(cfg, seed=seed)
+        for _ in range(days):
+            e.step(s.society_id, ticks=100)
+        from engine.metrics.social_metrics import group_metrics, fragmentation_score
+        from engine.politics.observability import polarization_per_axis
+        return {
+            "group_count": group_metrics(s)["active_group_count"],
+            "fragmentation": fragmentation_score(s),
+            "polarization": polarization_per_axis(s)["x_polarization"],
+        }
+
+    results = {}
+    for name in ablations:
+        disable = {
+            "no_groups": ["groups"],
+            "no_identity": ["identity"],
+            "no_information": ["information"],
+            "no_behavior": ["behavior"],
+            "none": [],
+        }.get(name)
+        if disable is None:
+            continue
+        results[name] = run_ablation(disable)
+    return {"agents": agents, "days": days, "seed": seed, "results": results}
 
 
 # --------------------------------------------------------------------------

@@ -65,6 +65,16 @@ def _belonging_need(p) -> float:
     return (p["agreeableness"] + p["empathy"] + p["extraversion"]) / 3.0
 
 
+def _indiv_pref(a: Agent) -> float:
+    """个体主义倾向 [-1,1]：v0.4 从 identity.belonging/autonomy 读取（§15），
+    初始由人格映射、随后随群体身份演化。"""
+    ident = getattr(a, "identity", None)
+    if ident is not None:
+        return ident.autonomy - ident.belonging
+    p = a.personality
+    return _autonomy_preference(p) - _belonging_need(p)
+
+
 def _econ_bias(gov: float, sensitivity: float, deadzone: float) -> float:
     """连续经济方向响应（§4, §5）：gov=0→+1, gov=0.5→0, gov=1→−1，无二值翻转。"""
     bias = math.tanh((0.5 - gov) * sensitivity)
@@ -102,8 +112,8 @@ def interpret_event(event_type: str, agent: Agent, sensitivity: float = 1.0, dea
 
     dy = sy * (authority - 0.5) * 2.0
 
-    # Z 方向 = 双向偏好（自主 − 归属），非硬 empathy 映射
-    indiv_pref = _autonomy_preference(p) - _belonging_need(p)
+    # Z 方向 = 双向偏好（自主 − 归属），非硬 empathy 映射（v0.4 用 identity §15）
+    indiv_pref = _indiv_pref(agent)
     dz = sz * indiv_pref
 
     return (dx * reactivity, dy * reactivity, dz * reactivity)
@@ -238,9 +248,14 @@ def compute_forces(a: Agent, society, params: ForceParams, rng, pressure: float,
     net = getattr(society, "_network", None)
     agent_map = society.agent_map()
 
-    # Z 双向偏好（§9）：autonomy_preference vs belonging_need
-    autonomy_pref = _autonomy_preference(p)
-    belonging_need = _belonging_need(p)
+    # Z 双向偏好（§9, v0.4 §15）：autonomy vs belonging，来自 identity（随群体演化）
+    ident = getattr(a, "identity", None)
+    if ident is not None:
+        autonomy_pref = ident.autonomy
+        belonging_need = ident.belonging
+    else:
+        autonomy_pref = _autonomy_preference(p)
+        belonging_need = _belonging_need(p)
     indiv_pref = autonomy_pref - belonging_need  # [-1, +1]
 
     # ---- X：连续经济驱动（§4–§7） ----------------------------------------

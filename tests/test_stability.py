@@ -18,6 +18,9 @@ from configs.loader import default_society_config                # noqa: E402
 def make_engine(agents=500, seed=42):
     cfg = default_society_config()
     cfg["population"]["count"] = agents
+    # v0.4: 本文件是 v0.3.1 稳定性测试，关闭 v0.4 特性以隔离 v0.3.1 动力学
+    for key in ("behavior", "groups", "identity", "information"):
+        cfg.setdefault(key, {})["enabled"] = False
     eng = SimulationEngine()
     s = eng.create_society(cfg, seed=seed)
     return eng, s

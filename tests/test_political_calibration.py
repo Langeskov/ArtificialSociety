@@ -18,6 +18,7 @@ from engine.agent.personality import Personality                      # noqa: E4
 from engine.agent.ideology import Ideology                            # noqa: E402
 from engine.simulation.engine import SimulationEngine                 # noqa: E402
 from configs.loader import default_society_config                     # noqa: E402
+from engine.identity.update import init_identity                      # noqa: E402
 from engine.politics.forces import (                                  # noqa: E402
     _econ_bias,
     _autonomy_preference,
@@ -46,6 +47,7 @@ def _make_agent(trust=0.5, authority=0.5, empathy=0.5, openness=0.5, risk=0.5,
         "trust": trust, "aggression": 0.5, "empathy": empathy, "authority_preference": authority,
     })
     a = Agent(id="t", personality=p, ideology=Ideology(x=x, y=y, z=z))
+    a.identity = init_identity(a)     # v0.4：从人格初始化身份（§16）
     a.status["trust_in_government"] = trust_gov
     if events:
         a.recent_events = events
@@ -122,9 +124,12 @@ class TestZResponse(unittest.TestCase):
 
     def test_z_has_no_systematic_positive_drift(self):
         # 无事件 + 中性资源 + 平衡人格 → mean Z drift ≈ 0（§11, §12）
+        # v0.4: 关闭群体/身份，隔离测试 v0.3.1 Z 校准（群体会产生合法的 Z- 漂移）
         cfg = default_society_config()
         cfg["population"]["count"] = 400
         cfg["events"]["frequency"] = 0.0
+        cfg["groups"]["enabled"] = False
+        cfg["identity"]["enabled"] = False
         eng = SimulationEngine()
         s = eng.create_society(cfg, seed=11)
         z0 = statistics.mean(a.ideology.z for a in s.agents)

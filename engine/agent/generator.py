@@ -25,6 +25,7 @@ from .agent import Agent
 from .personality import generate as gen_personality
 from .ideology import sample_ideology, IDEOLOGY_TEMPLATES
 from .resources import generate as gen_resources
+from ..identity.update import init_identity
 
 
 def _pick_ideology(distribution: Optional[dict], rng: random.Random) -> str:
@@ -71,20 +72,25 @@ def generate_population(pop_cfg: dict, seed: int = 0, dynamics_cfg: dict | None 
     pol = (dynamics_cfg or {}).get("politics", {})
     inertia_lo, inertia_hi = pol.get("inertia_range", [0.85, 0.98])
 
+    # v0.4: 区域分配（§47）— 用独立 RNG，避免扰动人口生成主 RNG 序列（保持 v0.3.1 确定性）
+    regions = (dynamics_cfg or {}).get("regions", {}).get("list", ["A", "B", "C"])
+    loc_rng = random.Random(seed + 987654)
+
     agents: list[Agent] = []
     for i in range(count):
         label = _pick_ideology(ideology_dist, rng)
-        agents.append(
-            Agent(
-                id=f"agent_{i:06d}",
-                age=rng.randint(int(age_lo), int(age_hi)),
-                personality=gen_personality(personality_dist, rng),
-                ideology=sample_ideology(label, rng),
-                resources=gen_resources(initial_resources, rng),
-                ai_level=_pick_ai_level(ai_levels, rng),
-                political_inertia=rng.uniform(inertia_lo, inertia_hi),
-            )
+        a = Agent(
+            id=f"agent_{i:06d}",
+            age=rng.randint(int(age_lo), int(age_hi)),
+            personality=gen_personality(personality_dist, rng),
+            ideology=sample_ideology(label, rng),
+            resources=gen_resources(initial_resources, rng),
+            ai_level=_pick_ai_level(ai_levels, rng),
+            political_inertia=rng.uniform(inertia_lo, inertia_hi),
         )
+        a.identity = init_identity(a)          # v0.4: 从人格初始化身份（§16，无 RNG）
+        a.location = loc_rng.choice(regions)    # v0.4: 初始区域（§47，独立 RNG）
+        agents.append(a)
     return agents
 
 

@@ -20,6 +20,7 @@ from ..agent.generator import generate_population
 from ..event.event import EventChain
 from ..metrics.metrics import compute_metrics
 from ..dynamics.stability import CollapseDetector
+from ..group.group import GroupRegistry
 
 
 @dataclass
@@ -40,6 +41,10 @@ class Society:
     collapse_detector: Optional[CollapseDetector] = None
     _network: Optional[dict] = None
     _agent_map: Optional[dict] = None
+    # v0.4 social layer
+    groups: GroupRegistry = field(default_factory=GroupRegistry)      # §70
+    information_messages: list = field(default_factory=list)          # §70
+    social_state: str = "NORMAL"                                      # §54 诊断分类
 
     def __post_init__(self) -> None:
         self.clock = Clock(
@@ -86,6 +91,9 @@ class Society:
             "alive_count": sum(1 for a in self.agents if a.alive),
             "event_count": len(self.events.events),
             "production_multiplier": round(self.production_multiplier, 4),
+            "group_count": len(self.groups.active()),
+            "information_count": len(self.information_messages),
+            "social_state": self.social_state,
             "metrics": self.metrics(),
             "config": self.config,
         }

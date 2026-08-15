@@ -1,0 +1,44 @@
+[
+  {
+    "active_group_count": 5,
+    "avg_group_size": 45.2,
+    "identity_strength": 0.502366341635049,
+    "fragmentation": 0.3712,
+    "integration": 0.3507,
+    "information_count": 417,
+    "cascade_count": 0,
+    "x_polarization": 1.053,
+    "y_polarization": 0.7389,
+    "z_polarization": 0.5234,
+    "scenario": "baseline",
+    "seed": 0
+  },
+  {
+    "active_group_count": 5,
+    "avg_group_size": 41.4,
+    "identity_strength": 0.4644556629494946,
+    "fragmentation": 0.3814,
+    "integration": 0.3812,
+    "information_count": 13,
+    "cascade_count": 0,
+    "x_polarization": 0.6325,
+    "y_polarization": 0.6457,
+    "z_polarization": 0.4528,
+    "scenario": "baseline",
+    "seed": 1
+  },
+  {
+    "active_group_count": 5,
+    "avg_group_size": 45.2,
+    "identity_strength": 0.5092578849798292,
+    "fragmentation": 0.3738,
+    "integration": 0.3655,
+    "information_count": 8,
+    "cascade_count": 0,
+    "x_polarization": 0.6211,
+    "y_polarization": 0.598,
+    "z_polarization": 0.4545,
+    "scenario": "baseline",
+    "seed": 2
+  }
+]

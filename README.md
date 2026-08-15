@@ -108,6 +108,26 @@ uv pip install --python .venv/Scripts/python.exe `
 .\.venv\Scripts\python.exe scripts\calibrate.py --days 100 --seeds 3          # 校准矩阵
 ```
 
+## v0.4 涌现社会（Emergent Society：Group + Identity + Information）
+
+从「多 Agent 模拟器」升级为「人工社会实验平台」：首次实现 **Agent → Relationship →
+Group → Identity → Information → Behavior → Event → Political Change** 的社会中间层闭环
+（见 `docs/emergent_society_v0.4_report.md`）。
+
+| 子系统 | 核心机制 |
+|---|---|
+| **Group**（`engine/group/`） | 5 因子 formation_score 涌现成组（非配置生成）、合并/分裂/解散生命周期 |
+| **Identity**（`engine/identity/`） | 社会身份（≠ ideology），belonging/autonomy 成为 Z 轴上游 |
+| **Information**（`engine/information/`） | Event/Information/Belief 三层分离、失真、谣言、级联、回音室 |
+| **Behavior→Event**（`engine/behavior/`） | 行为反向产生事件（work/trade/protest/conflict/migrate） |
+
+关键原则：`ideology ≠ group`、`personality ≠ identity`、`event ≠ belief`（§1 严禁概念混淆）。
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_groups.py tests/test_identity.py tests/test_information.py tests/test_social_emergence.py -v
+.\.venv\Scripts\python.exe scripts\ablate.py --agents 300 --days 30 --seeds 3   # 消融实验
+```
+
 ## 系统架构（六层）
 
 ```

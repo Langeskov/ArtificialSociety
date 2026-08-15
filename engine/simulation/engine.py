@@ -23,10 +23,17 @@ from ..economy.economy import step_economy
 from ..politics.politics import step_politics
 from ..event.engine import step_events
 from ..relationship.relationship import build_network
-from ..relationship.information import propagate_information
 from ..dynamics.decay import decay_events, decay_memory
 from ..dynamics.recovery import step_recovery
 from ..dynamics.stability import boundary_concentration
+from ..group.formation import step_formation
+from ..group.lifecycle import step_lifecycle
+from ..group.influence import apply_group_influence
+from ..identity.update import step_identity
+from ..information.propagation import step_information, echo_chamber_score
+from ..behavior.behavior import step_behavior
+from ..relationship.information import propagate_information
+from ..metrics.social_metrics import classify_social_state
 from models.external.provider import ModelProvider, make_provider
 
 
@@ -82,13 +89,32 @@ class SimulationEngine:
             # 4. 事件检测（含恢复型事件，§30）
             new_events = step_events(s, s.config, rng, resolved)
             events_emitted.extend(new_events)
-            # 5. 信息传播（§19, §20）
-            propagate_information(s, s.config, rng)
-            # 6. 政治更新（惯性 + 阻尼 + 个体化响应，§3–§9）
+            # 5. 行为 → 事件（v0.4 §40–§44 反向闭环）
+            if s.config.get("behavior", {}).get("enabled", True):
+                behavior_events = step_behavior(s, s.config, rng)
+            else:
+                behavior_events = []
+            events_emitted.extend(behavior_events)
+            # 6. 信息传播（v0.4 §25–§39：Event → Information → Belief）
+            #    information.enabled=false 时回退到 v0.3.1 核心事件学习（recent_events → politics）
+            if s.config.get("information", {}).get("enabled", True):
+                step_information(s, s.config, rng, list(new_events) + behavior_events)
+            else:
+                propagate_information(s, s.config, rng)
+            # 7. 群体形成 + 生命周期（v0.4 §5–§12）
+            if s.config.get("groups", {}).get("enabled", True):
+                step_formation(s, s.config, rng)
+                step_lifecycle(s, s.config, rng)
+            # 8. 群体影响 + 身份更新（v0.4 §20–§21, §16, §53）
+            if s.config.get("groups", {}).get("enabled", True):
+                apply_group_influence(s, s.config)
+            if s.config.get("identity", {}).get("enabled", True):
+                step_identity(s, s.config)
+            # 9. 政治更新（惯性 + 阻尼 + 个体化响应，§3–§9；使用 v0.4 identity）
             step_politics(s, s.config, rng, s._network)
-            # 7. LLM 决策（默认关闭 §32）
+            # 10. LLM 决策（默认关闭 §32）
             self._maybe_llm_decisions(s, provider, rng)
-            # 8. 记忆衰减（§21）
+            # 11. 记忆衰减（§21）
             for a in s.agents:
                 if a.alive and a.recent_events:
                     decay_memory(a, memory_decay, memory_size)
@@ -97,6 +123,9 @@ class SimulationEngine:
         s.metrics_history.append(metrics)
         if len(s.metrics_history) > 2000:
             s.metrics_history = s.metrics_history[-2000:]
+
+        # 12. 社会状态诊断（v0.4 §54，每 step 一次，不每 tick）
+        s.social_state = classify_social_state(s, metrics)
 
         # 9. 崩溃检测 + 边界集中检测（§26, §27）
         stab = s.config.get("stability", {})

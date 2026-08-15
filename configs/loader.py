@@ -92,6 +92,43 @@ def default_society_config() -> dict:
         "relationships": {
             "avg_degree": 6,
         },
+        # v0.4: 群体系统（§8, §9, §10, §11, §12；enabled=false 用于 ablation §67）
+        "groups": {
+            "enabled": True,
+            "formation": {"threshold": 0.55, "persistence_ticks": 20},
+            "min_size": 3,
+            "max_size": 200,
+            "dissolve": {"cohesion_threshold": 0.25, "persistence_ticks": 15},
+            "split": {"variance_threshold": 0.35, "cohesion_threshold": 0.45},
+            "merge": {"distance_threshold": 0.45},
+            "influence": {"anchor_pull": 0.002, "identity_gain": 0.01},
+        },
+        # v0.4: 身份系统（§53）
+        "identity": {
+            "enabled": True,
+            "group_autonomy_decay": 0.005,
+            "identity_decay": 0.95,
+        },
+        # v0.4: 信息系统（§32, §33, §36）
+        "information": {
+            "enabled": True,
+            "distortion_rate": 0.02,
+            "rumor_threshold": 0.35,
+            "ingroup_boost": 1.3,
+            "outgroup_penalty": 0.6,
+            "cascade_ratio": 0.25,
+        },
+        # v0.4: 行为系统（§44）
+        "behavior": {
+            "enabled": True,
+            "protest_threshold": 0.10,
+            "conflict_threshold": 0.05,
+            "migration_threshold": 0.08,
+        },
+        # v0.4: 社会地理（§47）
+        "regions": {
+            "list": ["A", "B", "C"],
+        },
         "events": {
             "frequency": 0.02,
             # v0.2: event lifecycle (§10, §11)

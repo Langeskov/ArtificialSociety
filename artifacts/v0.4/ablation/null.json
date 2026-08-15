@@ -1,0 +1,44 @@
+[
+  {
+    "active_group_count": 0,
+    "avg_group_size": 0.0,
+    "identity_strength": 0.0,
+    "fragmentation": 0.0,
+    "integration": 1.0,
+    "information_count": 0,
+    "cascade_count": 0,
+    "x_polarization": 0.8501,
+    "y_polarization": 0.7218,
+    "z_polarization": 0.4959,
+    "scenario": "null",
+    "seed": 0
+  },
+  {
+    "active_group_count": 0,
+    "avg_group_size": 0.0,
+    "identity_strength": 0.0,
+    "fragmentation": 0.0,
+    "integration": 1.0,
+    "information_count": 0,
+    "cascade_count": 0,
+    "x_polarization": 1.1331,
+    "y_polarization": 0.7543,
+    "z_polarization": 0.5909,
+    "scenario": "null",
+    "seed": 1
+  },
+  {
+    "active_group_count": 0,
+    "avg_group_size": 0.0,
+    "identity_strength": 0.0,
+    "fragmentation": 0.0,
+    "integration": 1.0,
+    "information_count": 0,
+    "cascade_count": 0,
+    "x_polarization": 0.7756,
+    "y_polarization": 0.6217,
+    "z_polarization": 0.4769,
+    "scenario": "null",
+    "seed": 2
+  }
+]

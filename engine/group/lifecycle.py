@@ -47,7 +47,7 @@ def step_lifecycle(society, cfg: dict, rng: random.Random) -> list[dict]:
     split_variance = gcfg.get("split", {}).get("variance_threshold", 0.35)
     split_cohesion = gcfg.get("split", {}).get("cohesion_threshold", 0.45)
     merge_distance = gcfg.get("merge", {}).get("distance_threshold", 0.45)
-
+    min_size = gcfg.get("min_size", 3)
     registry = getattr(society, "groups", None)
     if registry is None:
         return []
@@ -72,9 +72,19 @@ def step_lifecycle(society, cfg: dict, rng: random.Random) -> list[dict]:
             events.append({"type": "GROUP_DISSOLVED", "group_id": g.id, "tick": society.clock.tick})
             continue
 
+        # --- 低于最小规模强制解散（v0.4.1：成员可通过 leave_group 行为退出，
+        #     缩小后的组低于 min_size 不应继续存活。同时覆盖 FORMING 状态，
+        #     因为 split 会直接创建 ACTIVE 组，其半数成员可能低于 min_size。） ---
+        if g.is_alive() and g.size() < min_size:
+            _dissolve(g, registry, agent_map, society.clock.tick)
+            events.append({"type": "GROUP_DISSOLVED", "group_id": g.id, "tick": society.clock.tick})
+            continue
         # --- 分裂（§11）：内部政治方差高 + 凝聚力低 ------------------------
         max_var = max(g.variance_x, g.variance_y, g.variance_z)
-        if g.state == GROUP_STATE.ACTIVE and max_var > split_variance and g.cohesion < split_cohesion and g.size() >= 6:
+        # v0.4.1：split 必须检查 min_size——半数成员不能低于 min_size，否则
+        # 立刻产生两个低于最小规模的组（虽然下一轮会被溶解，但 churn 浪费）。
+        half_size = g.size() // 2
+        if g.state == GROUP_STATE.ACTIVE and max_var > split_variance and g.cohesion < split_cohesion and g.size() >= 6 and half_size >= min_size:
             _split(g, registry, agent_map, society.clock.tick)
             events.append({"type": "GROUP_SPLIT", "group_id": g.id, "tick": society.clock.tick})
 

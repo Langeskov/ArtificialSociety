@@ -36,10 +36,11 @@ uv pip install --python .venv/Scripts/python.exe `
 ## 运行测试
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest          # 25 个测试（冒烟 + 稳定性 + 政治动力学）
+.\.venv\Scripts\python.exe -m pytest          # 89 个测试（冒烟 + 稳定性 + 政治动力学 + 社会涌现 + 资源层）
 # 或分套件运行：
 .\.venv\Scripts\python.exe -m pytest tests/test_stability.py -v
 .\.venv\Scripts\python.exe -m pytest tests/test_political_dynamics.py -v
+.\.venv\Scripts\python.exe -m pytest tests/test_resource_v041.py -v
 ```
 
 无头冒烟测试覆盖 MVP 闭环（创建 → 生成 → 运行 → 漂移 → 事件 → 指标），
@@ -128,6 +129,31 @@ Group → Identity → Information → Behavior → Event → Political Change**
 .\.venv\Scripts\python.exe scripts\ablate.py --agents 300 --days 30 --seeds 3   # 消融实验
 ```
 
+## v0.4.1 资源经济与行为系统（Resource & Behavior Layer）
+
+把资源从「被读取的状态变量」升级为「约束可行动空间」的连续信号，经济闭环
+（见 `docs/resource_economy_v0.4.1_report.md`）：
+
+| 子系统 | 核心机制 |
+|---|---|
+| **Resource Security**（`engine/economy/security.py`） | 四类加权 sigmoid 连续安全度，禁止硬阈值跳变 |
+| **Transaction Layer**（`engine/economy/transaction.py`） | reserve/commit/release 三态 + ResourceLedger 流水账 |
+| **Action System**（`engine/behavior/`） | 12 种行为：候选→可行性→效用→softmax 概率选择→成本结算 |
+| **Group Resource Pool**（`engine/group/resources.py`） | 贡献/贫困分配/资源反馈（池充裕↔凝聚力回路） |
+| **Regional Economy**（`engine/economy/region.py`） | 区域禀赋/稀缺定价/局部冲击 |
+| **Relative Deprivation**（`engine/economy/deprivation.py`） | 同 region 中位数参照的连续剥夺感 |
+
+关键变更：**取消每 tick 固定收入**——收入只来自 `work` 行为；所有跨主体资源
+流动经 Transaction Layer 守恒转移。本版本的核心教训：效用系统必须满足资源
+预算约束（报告中记录了 12 个失稳案例：能量死亡螺旋、流动性死亡、群体池黑洞、
+membership 爆炸等及其修复）。
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_resource_v041.py -v   # 27 个资源层测试
+```
+
+新增 API：`GET /api/society/{id}/ledger`（资源流水账）、`GET /api/society/{id}/regions`（区域经济）。
+
 ## 系统架构（六层）
 
 ```
@@ -213,6 +239,8 @@ GET  /api/society/{id}/politics/distribution   X/Y/Z 分布直方图
 GET  /api/society/{id}/politics/clusters       政治簇检测
 GET  /api/society/{id}/politics/correlation    轴相关矩阵
 GET  /api/society/{id}/politics/attractors     吸引子检测
+GET  /api/society/{id}/ledger                  资源流水账（v0.4.1）
+GET  /api/society/{id}/regions                 区域资源经济（v0.4.1）
 GET  /api/agent/{id}                           单 Agent 详情（含力分解）
 GET  /api/agent/{id}/history                   单 Agent 历史轨迹
 GET  /api/agent/{id}/relationships             社会关系
@@ -253,8 +281,9 @@ LLM 使用比例 · Model Provider · Model Name
 - **零前端依赖**：3D 散点图用 Canvas 2D 手写透视投影 + 轨道控制器（旋转/缩放/平移/点选），
   不依赖 CDN，离线可用；
 - **后端**：FastAPI + uvicorn（含 websockets），SQLite（stdlib）+ JSON 事件日志；
-- **性能**：1000 Agent 约 **61 ticks/sec**（500 Agent 约 149 ticks/sec，纯 Python，未向量化），
-  Agent 状态每 20 tick 采样一次入库存历史；
+- **性能**：v0.4.1 的 Action System 每 Agent 每 tick 评估 12 种候选行为（可行性+效用），
+  1000 Agent 为 **~18 ticks/sec**（500 Agent ~40，v0.4 规则行为时为 61/149——行为
+  智能化是有成本的；长跑时间恒定，无退化）。Agent 状态每 20 tick 采样一次入库存历史；
 - **存储**：`data/society.sqlite3`（结构化）+ `data/events.jsonl`（追加事件日志）。
 
 ## 启动方式（三种）
@@ -291,15 +320,13 @@ LLM 使用比例 · Model Provider · Model Name
 
 ## 当前问题和已知限制
 
-1. **性能未达目标**：v0.3 引入三轴力分解 + 观测指标后，1000 Agent 从 v0.2 的 ~67
-   ticks/sec 降到 46，本轮优化回补到 **61**，仍未达到计划书 ~80 的目标。
-   瓶颈在 `compute_forces` 的社会影响循环（O(n×degree) 的逐邻居距离计算）和
-   逐 Agent 的标量算术，尚未向量化。
-2. **长跑验收是缩水版**：计划书 §50 要求 1000 Agent × 1000 天 × 10 Society，
-   在纯 Python 下约需 5–10 小时；当前验证跑的是 1000 × 30 天 × 10（
-   `scripts/longrun_report.py` 的 `DAYS` 可调）。结论方向可信，但未完成完整 1000 天。
-3. **社会影响是静态网络**：关系网络在初始化后不再演化，信息传播/回音室基于固定拓扑；
-   群体形成、就业、贸易、政党等高级社会动力学（计划书 Phase 8）尚未实现。
+1. **性能**：v0.4.1 Action System（12 候选行为 × 可行性+效用评估）把 1000 Agent
+   降到 ~18 ticks/sec（v0.4 规则行为为 61）。这是行为智能化的结构性成本，
+   需要 NumPy 向量化 `compute_forces` + 行为评估批量版才能回到 60+。
+2. **长跑验收是缩水版**：计划书 §50 要求 1000 Agent × 1000 天 × 10 Society；
+   当前验证跑的是 300×30 天校准（v0.4.1）与 1000×30 天×10（`scripts/longrun_report.py`）。
+3. **低货币均衡**：v0.4.1 稳态 money≈2——财产（property）完全非流动，缺变卖路径。
+4. **社会影响是静态网络**：关系网络在初始化后不再演化（群体成员关系已是动态的）。
 
 ## 下一步优化
 

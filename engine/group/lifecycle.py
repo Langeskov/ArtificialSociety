@@ -81,6 +81,9 @@ def step_lifecycle(society, cfg: dict, rng: random.Random) -> list[dict]:
     # --- 合并（§10）：政治距离近 + 存在互动 ---------------------------------
     _merge_close_groups(registry, agent_map, network, merge_distance, society.clock.tick, events)
 
+    # v0.4.1：清除已解散群体，保持 active 集合有界（否则 merge 成本随时间平方膨胀）
+    registry.purge_dissolved()
+
     return events
 
 
@@ -125,6 +128,10 @@ def _merge_close_groups(registry, agent_map: dict, network: dict, distance_thres
     active = registry.active()
     if len(active) < 2:
         return
+    # v0.4.1 安全阀：配对扫描 O(A²)，活跃组过多时只取最早创建的 40 个
+    # （dict 插入序，确定性），防止 churn 期 merge 成本爆炸。
+    if len(active) > 40:
+        active = active[:40]
     # 找距离最近的一对
     best = None
     for i in range(len(active)):

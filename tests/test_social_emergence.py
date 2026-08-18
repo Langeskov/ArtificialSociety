@@ -70,7 +70,9 @@ class TestFeedbackLoop(unittest.TestCase):
         in_group = [a for a in s.agents if a.identity.membership_count() > 0]
         self.assertGreater(len(in_group), 0)
         for a in in_group[:20]:
-            self.assertGreaterEqual(a.identity.belonging, 0.3, "群体成员归属感应升高")
+            # v0.4.1：身份目标人格化后，低亲和力 agent 的 belonging 目标低于 0.65，
+            # 不再所有成员收敛到同一高归属。阈值从 0.3 降到 0.25 以适应个性化分布。
+            self.assertGreaterEqual(a.identity.belonging, 0.25, "群体成员归属感应升高")
 
 
 class TestSocialEmergence(unittest.TestCase):

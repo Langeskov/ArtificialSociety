@@ -50,13 +50,16 @@ def default_society_config() -> dict:
             "income_sigma": 2.0,
             "food_consumption": 0.05,
             "energy_consumption": 0.03,
-            "tax_rate": 0.08,
+            "tax_rate": 0.01,            # 按日税率（v0.4.1：收入来自 work，8%/日在无固定收入下会抽干流动性）
             "redistribution": 0.5,
             # v0.2: resource production / recovery (§14, §15)
-            "food_production": 0.12,       # per-agent food income per tick
-            "energy_production": 0.06,     # per-agent energy income per tick
+            # v0.4.1：产出挂在 work 行为上（非每 tick 固定发放），系数按
+            # 「~15% 工作率即可养活全队」校准：0.6×0.75×15 ≈ 6.8 food/day > 5 代谢
+            "food_production": 0.6,        # work 行为的食物产出系数（v0.4.1 移入行为）
+            "energy_production": 0.06,     # work 行为的能量产出系数
             "food_critical": 20.0,         # below this → survival/recovery mode
             "recovery_rate": 0.05,         # production recovery per tick after shocks
+            "trade_base_price": 1.0,       # v0.4.1 §20：食物基础价格
         },
         "politics": {
             "movement_strength": 0.01,
@@ -128,6 +131,30 @@ def default_society_config() -> dict:
         # v0.4: 社会地理（§47）
         "regions": {
             "list": ["A", "B", "C"],
+            # v0.4.1 §31：不同资源禀赋
+            "endowments": {
+                "A": {"food": 1.0, "energy": 1.0, "jobs": 0.6},
+                "B": {"food": 1.2, "energy": 0.8, "jobs": 0.5},
+                "C": {"food": 0.8, "energy": 1.2, "jobs": 0.5},
+            },
+        },
+        # v0.4.1: 资源安全层（§2–§6）
+        "resource_security": {
+            "critical": {"food": 20.0, "money": 15.0, "energy": 10.0, "information": 20.0},
+            "scale": 0.5,
+            "weights": {"survival": 0.35, "economic": 0.25, "activity": 0.20, "decision": 0.20},
+        },
+        # v0.4.1: 行为参数（§10–§14，可覆盖 actions.py 默认值）
+        "actions": {
+            "work": {"cost": {"energy": 2.0, "food": 0.02}},
+            "migrate": {"cost": {"money": 30.0, "energy": 15.0}},
+            "protest": {"cost": {"energy": 5.0}},
+        },
+        # v0.4.1: 群体资源池（§21–§24）
+        # distribution 0.5：池子必须及时回流，否则成为食物黑洞（v0.4.1 实测教训）
+        "group_resources": {
+            "contribution_probability": 0.1,
+            "distribution_probability": 0.5,
         },
         "events": {
             "frequency": 0.02,

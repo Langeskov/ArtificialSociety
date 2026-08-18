@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from .group import Group
 from ..agent.agent import Agent
+from ..identity.update import identity_targets
 
 
 def group_pressure(g: Group, agent: Agent) -> float:
@@ -35,9 +36,11 @@ def apply_group_influence(society, cfg: dict) -> None:
             if m is None or not m.alive:
                 continue
             pressure = group_pressure(g, m)
-            # 身份强化（§20, §52）：归属/忠诚向目标值靠拢（不饱和到 1，保留多样性 §19）
+            # 身份强化（§20, §52）：归属向人格化目标靠拢、忠诚向 0.8 靠拢（保留多样性 §19）
+            # v0.4.1：belonging 目标不再固定 0.65（否则全员收敛同一身份，Z 轴单极化）
             ident = m.identity
-            ident.belonging = max(0.0, min(1.0, ident.belonging + (0.65 - ident.belonging) * identity_gain * pressure))
+            target_bel, _ = identity_targets(m.personality)
+            ident.belonging = max(0.0, min(1.0, ident.belonging + (target_bel - ident.belonging) * identity_gain * pressure))
             ident.group_loyalty = max(0.0, min(1.0, ident.group_loyalty + (0.8 - ident.group_loyalty) * identity_gain * pressure))
             # 微弱锚点牵引：长期偏好缓慢向群体中心靠拢（不直接改 x/y/z，§19）
             ax, ay, az = m.ideology_anchor

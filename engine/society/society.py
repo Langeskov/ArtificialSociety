@@ -21,6 +21,8 @@ from ..event.event import EventChain
 from ..metrics.metrics import compute_metrics
 from ..dynamics.stability import CollapseDetector
 from ..group.group import GroupRegistry
+from ..economy.transaction import ResourceLedger
+from ..economy.region import RegionRegistry
 
 
 @dataclass
@@ -45,6 +47,9 @@ class Society:
     groups: GroupRegistry = field(default_factory=GroupRegistry)      # §70
     information_messages: list = field(default_factory=list)          # §70
     social_state: str = "NORMAL"                                      # §54 诊断分类
+    # v0.4.1 resource layer
+    resource_ledger: ResourceLedger = field(default_factory=ResourceLedger)  # §62
+    regions: Optional[RegionRegistry] = None                            # §31
 
     def __post_init__(self) -> None:
         self.clock = Clock(
@@ -57,6 +62,10 @@ class Society:
         if not self.agents and self.config.get("population"):
             self.agents = generate_population(self.config["population"], self.seed, self.config)
         self._agent_map = {a.id: a for a in self.agents}
+
+        # v0.4.1: 区域资源模型（§31）
+        region_ids = self.config.get("regions", {}).get("list", ["A", "B", "C"])
+        self.regions = RegionRegistry(region_ids)
 
         # Collapse detector configured from the stability section (§26).
         stab = self.config.get("stability", {})
@@ -94,6 +103,8 @@ class Society:
             "group_count": len(self.groups.active()),
             "information_count": len(self.information_messages),
             "social_state": self.social_state,
+            # v0.4.1: 区域资源（§50）
+            "regions": self.regions.as_list() if self.regions else [],
             "metrics": self.metrics(),
             "config": self.config,
         }

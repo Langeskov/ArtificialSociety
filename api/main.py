@@ -265,6 +265,25 @@ def society_groups(society_id: str):
     return {"groups": s.groups.as_list(), "history": s.groups.history[-100:]}
 
 
+@app.get("/api/society/{society_id}/ledger")
+def society_ledger(society_id: str, limit: int = 200):
+    """资源流水账（v0.4.1 §62）：跨主体资源变化的可审计记录。"""
+    s = engine.get(society_id)
+    if s is None:
+        raise HTTPException(404, "society not found")
+    limit = max(1, min(limit, 2000))
+    return {"count": len(s.resource_ledger.entries), "entries": s.resource_ledger.recent(limit)}
+
+
+@app.get("/api/society/{society_id}/regions")
+def society_regions(society_id: str):
+    """区域资源经济（v0.4.1 §31–§33）：各 region 的供给/价格/人口/就业。"""
+    s = engine.get(society_id)
+    if s is None:
+        raise HTTPException(404, "society not found")
+    return {"regions": s.regions.as_list() if s.regions else []}
+
+
 @app.get("/api/society/{society_id}/events")
 def society_events(society_id: str, limit: int = 200):
     s = engine.get(society_id)

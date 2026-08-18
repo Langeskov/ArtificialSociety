@@ -14,6 +14,21 @@ def _clamp01(x: float) -> float:
     return max(0.0, min(1.0, x))
 
 
+def identity_targets(p) -> tuple[float, float]:
+    """群体成员身份的人格化目标（§19 不锁死）：(target_belonging, target_autonomy)。
+
+    群体社会化使归属向集体靠拢、自主性略降，但目标随人格基线变化——
+    高开放/高自主人格在群体中保留更多自主性。
+
+    v0.4.1 修复：原固定 0.65/0.35 目标让所有成员收敛到同一身份（indiv_pref
+    恒为 -0.3），在微型组全覆盖的生态下 Z 轴失去双向性（实测 285:3 全员 Z-）。
+    人格化目标恢复 indiv_pref 的个体差异，同时保留「入组平均偏集体」的方向。
+    """
+    base_bel = (p["agreeableness"] + p["empathy"] + p["extraversion"]) / 3.0
+    base_aut = (p["openness"] + p["risk_tolerance"] + (1.0 - p["agreeableness"])) / 3.0
+    return 0.35 + 0.5 * base_bel, 0.15 + 0.5 * base_aut
+
+
 def init_identity(agent) -> Identity:
     """从人格初始化身份（§16）：belonging/autonomy 初始由人格映射，但随后演化。"""
     p = agent.personality
@@ -43,12 +58,13 @@ def step_identity(society, cfg: dict) -> None:
 
         n_groups = ident.membership_count()
         if n_groups > 0:
-            # 群体成员 → 身份强度由归属+忠诚决定（§18），归属/自主向目标靠拢（不锁死 §19）
+            # 群体成员 → 身份强度由归属+忠诚决定（§18），归属/自主向人格化目标靠拢（§19 不锁死）
+            target_bel, target_aut = identity_targets(a.personality)
             ident.social_identity_strength = _clamp01(
                 0.25 + 0.5 * ident.belonging + 0.25 * ident.group_loyalty
             )
-            ident.belonging = _clamp01(ident.belonging + (0.65 - ident.belonging) * 0.01)
-            ident.autonomy = _clamp01(ident.autonomy + (0.35 - ident.autonomy) * autonomy_decay)
+            ident.belonging = _clamp01(ident.belonging + (target_bel - ident.belonging) * 0.01)
+            ident.autonomy = _clamp01(ident.autonomy + (target_aut - ident.autonomy) * autonomy_decay)
         else:
             # 无群体 → 身份强度与忠诚衰减，归属/自主回归人格基线（§53 身份重组）
             ident.social_identity_strength *= identity_decay

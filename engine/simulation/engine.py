@@ -20,6 +20,9 @@ from typing import Optional
 from ..society.society import Society
 from ..agent.agent import Agent
 from ..economy.economy import step_economy
+from ..economy.security import update_resource_state
+from ..economy.deprivation import update_relative_deprivation
+from ..economy.region import update_regions
 from ..politics.politics import step_politics
 from ..event.engine import step_events
 from ..relationship.relationship import build_network
@@ -29,6 +32,7 @@ from ..dynamics.stability import boundary_concentration
 from ..group.formation import step_formation
 from ..group.lifecycle import step_lifecycle
 from ..group.influence import apply_group_influence
+from ..group.resources import step_group_resources
 from ..identity.update import step_identity
 from ..information.propagation import step_information, echo_chamber_score
 from ..behavior.behavior import step_behavior
@@ -79,42 +83,53 @@ class SimulationEngine:
 
         for _ in range(n):
             s.clock.advance(1)
-            # 1. 经济 + 资源恢复（§14, §15）— 税收按日征收（§12）
+            # 1. 经济基础代谢 + 税收（v0.4.1 §2：收入由 work 行为产生，不再每 tick 固定）
             collect_tax = (s.clock.tick % s.clock.ticks_per_day == 0)
             step_economy(s.agents, s.config, rng, s.production_multiplier, collect_tax)
-            # 2. 生产恢复（§13）
+            # 2. 生产恢复（§38）
             step_recovery(s, s.config)
-            # 3. 事件生命周期衰减（§10, §11），返回本 tick 解决的事件
+            # 3. 资源安全/压力更新（v0.4.1 §2–§6：连续信号）
+            for a in s.agents:
+                if a.alive:
+                    update_resource_state(a, s.config)
+            # 4. 相对剥夺更新（v0.4.1 §25–§27）
+            update_relative_deprivation(s.agents, s.config)
+            # 5. 事件生命周期衰减（§10, §11），返回本 tick 解决的事件
             resolved = decay_events(s.events, s.config)
-            # 4. 事件检测（含恢复型事件，§30）
+            # 6. 事件检测（含恢复型事件，§30）
             new_events = step_events(s, s.config, rng, resolved)
             events_emitted.extend(new_events)
-            # 5. 行为 → 事件（v0.4 §40–§44 反向闭环）
+            # 7. 行为 → 事件（v0.4.1 §9–§20 Action System：候选→可行性→效用→选择→成本结算）
             if s.config.get("behavior", {}).get("enabled", True):
                 behavior_events = step_behavior(s, s.config, rng)
             else:
                 behavior_events = []
             events_emitted.extend(behavior_events)
-            # 6. 信息传播（v0.4 §25–§39：Event → Information → Belief）
+            # 8. 群体资源池（v0.4.1 §21–§24 贡献/分配/反馈）
+            if s.config.get("groups", {}).get("enabled", True):
+                step_group_resources(s, s.config, rng)
+            # 9. 信息传播（v0.4 §25–§39：Event → Information → Belief）
             #    information.enabled=false 时回退到 v0.3.1 核心事件学习（recent_events → politics）
             if s.config.get("information", {}).get("enabled", True):
                 step_information(s, s.config, rng, list(new_events) + behavior_events)
             else:
                 propagate_information(s, s.config, rng)
-            # 7. 群体形成 + 生命周期（v0.4 §5–§12）
+            # 10. 群体形成 + 生命周期（v0.4 §5–§12）
             if s.config.get("groups", {}).get("enabled", True):
                 step_formation(s, s.config, rng)
                 step_lifecycle(s, s.config, rng)
-            # 8. 群体影响 + 身份更新（v0.4 §20–§21, §16, §53）
+            # 11. 群体影响 + 身份更新（v0.4 §20–§21, §16, §53）
             if s.config.get("groups", {}).get("enabled", True):
                 apply_group_influence(s, s.config)
             if s.config.get("identity", {}).get("enabled", True):
                 step_identity(s, s.config)
-            # 9. 政治更新（惯性 + 阻尼 + 个体化响应，§3–§9；使用 v0.4 identity）
+            # 12. 政治更新（惯性 + 阻尼 + 个体化响应，§3–§9；使用 v0.4 identity）
             step_politics(s, s.config, rng, s._network)
-            # 10. LLM 决策（默认关闭 §32）
+            # 13. 区域资源更新（v0.4.1 §31：统计 + 价格）
+            update_regions(s, s.config)
+            # 14. LLM 决策（默认关闭 §32）
             self._maybe_llm_decisions(s, provider, rng)
-            # 11. 记忆衰减（§21）
+            # 15. 记忆衰减（§21）
             for a in s.agents:
                 if a.alive and a.recent_events:
                     decay_memory(a, memory_decay, memory_size)

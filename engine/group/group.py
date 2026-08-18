@@ -103,6 +103,18 @@ class GroupRegistry:
     def active(self) -> list[Group]:
         return [g for g in self.groups.values() if g.is_alive()]
 
+    def purge_dissolved(self) -> int:
+        """从注册表移除已解散的 Group（history 保留记录）。
+
+        v0.4.1：行为系统引入 leave_group/join_group 后群体处于动态 churn，
+        死亡群体不清除会让 merge 的 O(A²) 配对成本随时间平方增长（实测
+        800 tick 累积 2268 个注册群体 → 每 tick 数百万次配对计算）。
+        """
+        dead = [gid for gid, g in self.groups.items() if g.state == GROUP_STATE.DISSOLVED]
+        for gid in dead:
+            del self.groups[gid]
+        return len(dead)
+
     def record(self, event_type: str, **kwargs) -> None:
         self.history.append({"type": event_type, **kwargs})
 

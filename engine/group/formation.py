@@ -83,8 +83,10 @@ def step_formation(society, cfg: dict, rng: random.Random) -> list[Group]:
     for a in society.agents:
         if not a.alive:
             continue
-        # 已在组中的 Agent 不再作为种子（可加入新组，但先由现有组吸收）
-        if a.identity and a.identity.membership_count() >= 2:
+        # 已在组中的 Agent 不再作为种子（v0.4.1：>=2 → >=1。
+        # 新组只从完全无归属的 Agent 池中涌现；多重归属通过 join/merge/split 获得。
+        # 原 >=2 门槛叠加动态 join/leave 会造成「退群→再成组」的永动 churn。）
+        if a.identity and a.identity.membership_count() >= 1:
             counter.pop(a.id, None)
             continue
         score = formation_score(a, network, agent_map, avg_degree)
@@ -96,8 +98,18 @@ def step_formation(society, cfg: dict, rng: random.Random) -> list[Group]:
             counter.pop(a.id, None)
 
     new_groups: list[Group] = []
-    # 限制每 tick 成组数量，避免一次性爆发（§8）
-    for seed in seeds[: max(1, len(seeds) // 4)]:
+    # 限制每 tick 成组数量（硬上限 2），避免一次性爆发（§8）。
+    # v0.4.1：原 seeds//4 在大规模游离态下（如经济崩溃后大量退群）会每 tick
+    # 爆发数十个新组，叠加 merge 的 O(A²) 配对导致慢性性能坍塌。
+    tick = society.clock.tick
+    cooldown = gcfg.get("reform_cooldown_ticks", 50)
+    formed = 0
+    for seed in seeds:
+        if formed >= 2:
+            break
+        # 退群冷却：刚离开群体的 Agent 不立即成为新组种子（抑制 churn）
+        if tick - seed.status.get("last_leave_group_tick", -10 ** 9) < cooldown:
+            continue
         if seed.identity and seed.identity.membership_count() >= 1:
             continue
         members = _gather_members(seed, network, agent_map, rng, min_size, max_size)
@@ -105,6 +117,7 @@ def step_formation(society, cfg: dict, rng: random.Random) -> list[Group]:
             continue
         g = _create_group(registry, society.clock.tick, members, agent_map)
         new_groups.append(g)
+        formed += 1
 
     return new_groups
 

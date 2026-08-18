@@ -1,8 +1,12 @@
-"""Behavior → Event — Agent 行为产生事件的反向闭环（v0.4 §40–§44）。
+"""Behavior → Event 反向闭环（v0.4 §40–§44 → v0.4.1 §9–§20 重构）。
 
-当前系统只有 Event → Agent；v0.4 增加 Agent → Behavior → Event。第一版用
-rule-based 行为选择（§41），不需要复杂规划。行为聚合为微事件，微事件升级为
-宏观事件（§44）：behavior → micro event → macro event。
+v0.4.1 将 rule-based 硬阈值行为升级为 Action System：
+  候选行为 → 可行性（§12）→ 效用（§13）→ 概率选择 → 成本结算（§60）→ 执行。
+
+资源不再是行为「读取的状态变量」，而是「约束可行动空间」的真实约束：
+  - 行为有成本（§1）：work 耗能、migrate 耗钱耗能；
+  - 交易/迁移/分享必须通过 Transaction Layer（§8），守恒（§61）；
+  - 工作产出与 productivity 相关（§14）。
 """
 
 from __future__ import annotations
@@ -11,48 +15,25 @@ import random
 from typing import Optional
 
 from ..agent.agent import Agent
+from ..economy.transaction import reserve, commit, release, transfer
+from .actions import default_actions
+from .utility import compute_feasibility, compute_utility, select_action
 
 
-def _select_behavior(a: Agent, society, cfg: dict, rng: random.Random) -> str:
-    """规则式行为选择（§41, §42）：按资源/愤怒/群体/信息状态选最合理行为。"""
-    p = a.personality
-    anger = a.status.get("anger", 0.0)
-    trust_gov = a.status.get("trust_in_government", 0.5)
-    starving = a.resources.is_starving()
-    broke = a.resources.is_broke()
-
-    # 生存优先：饥饿/破产 → 工作或迁移
-    if starving or broke:
-        if rng.random() < p["risk_tolerance"] * 0.5:
-            return "migrate"
-        return "work"
-
-    # 愤怒 + 低政府信任 → 抗议
-    if anger > 0.6 and trust_gov < 0.4 and rng.random() < anger * 0.3:
-        return "protest"
-
-    # 群体成员 + 高凝聚力 → 合作；跨群体紧张 → 冲突
-    ident = getattr(a, "identity", None)
-    if ident is not None and ident.membership_count() > 0:
-        if rng.random() < 0.4:
-            return "cooperate"
-
-    # 资源不平衡 → 交易
-    money = a.resources.values.get("money", 0.0)
-    food = a.resources.values.get("food", 0.0)
-    if money > 600 and food < 40:
-        return "trade"
-    if food > 80 and money < 200:
-        return "trade"
-
-    # 默认工作
-    return "work"
+def _build_ctx(society, cfg: dict) -> dict:
+    return {
+        "society": society,
+        "cfg": cfg,
+        "agent_map": society.agent_map(),
+        "network": getattr(society, "_network", {}) or {},
+        "groups": getattr(society, "groups", None),
+    }
 
 
-def step_behavior(society, cfg: dict, rng: random.Random) -> list[dict]:
-    """推进行为：选择 + 执行 + 聚合为事件（§41–§44）。返回产生的微事件列表。"""
+def step_behavior(society, cfg: dict, rng: random.Random) -> list:
+    """推进行为：候选→选择→成本结算→执行→聚合为事件（§9–§14, §44）。"""
     bcfg = cfg.get("behavior", {})
-    protest_event_threshold = bcfg.get("protest_threshold", 0.10)   # 抗议人数占比
+    protest_event_threshold = bcfg.get("protest_threshold", 0.10)
     conflict_event_threshold = bcfg.get("conflict_threshold", 0.05)
     migration_event_threshold = bcfg.get("migration_threshold", 0.08)
 
@@ -61,72 +42,270 @@ def step_behavior(society, cfg: dict, rng: random.Random) -> list[dict]:
     if n_alive == 0:
         return []
 
-    registry = getattr(society, "groups", None)
-    agent_map = society.agent_map()
+    actions = default_actions(cfg)
+    ctx = _build_ctx(society, cfg)
+    ctx["food_price"] = _food_price(ctx)  # §20 价格每 tick 计算一次，而非每次交易重算全局均值
+    ledger = getattr(society, "resource_ledger", None)
+    tick = society.clock.tick
 
-    protests = 0
-    conflicts = 0
-    migrations = 0
-    micro_events: list[dict] = []
+    counters = {"protest": 0, "conflict": 0, "migrate": 0, "trade": 0,
+                "share": 0, "hoard": 0, "work": 0, "cooperate": 0}
+    micro_events: list = []
 
     for a in agents:
-        action = _select_behavior(a, society, cfg, rng)
-        if action == "work":
-            a.resources.add("money", 1.0)
-        elif action == "trade":
-            _do_trade(a, society, rng, agent_map)
-        elif action == "cooperate":
-            a.status["anger"] = max(0.0, a.status.get("anger", 0.0) - 0.02)
-            a.status["trust_in_government"] = min(1.0, a.status.get("trust_in_government", 0.5) + 0.005)
-        elif action == "protest":
-            protests += 1
-            a.status["anger"] = max(0.0, a.status.get("anger", 0.0) - 0.1)   # 宣泄
-        elif action == "migrate":
-            migrations += 1
-            _do_migrate(a, society, cfg, rng)
-        # conflict 行为由跨群体张力在下方聚合触发
+        sel = select_action(a, actions, ctx, rng)
+        if sel is None:
+            a.current_action = ""
+            continue
+        act, u, f = sel
+        # 记录选择（Inspector §46：Agent 为什么做这个行为）——直接复用 select_action 的评估结果
+        a.current_action = act.name
+        a.action_utility = round(u, 4)
+        a.action_feasibility = round(f, 4)
+        _execute(a, act, ctx, rng, ledger, tick, counters)
 
-    # 跨群体冲突（§50, §78）：随机采样群体对，低信任 → 冲突
-    conflicts += _inter_group_conflict(society, registry, agent_map, rng, cfg)
+    # 跨群体冲突（§50, §78）
+    counters["conflict"] += _inter_group_conflict(society, ctx["groups"], ctx["agent_map"], rng, cfg)
 
     # 聚合为宏观事件（§44）
-    if n_alive > 0 and protests / n_alive >= protest_event_threshold and not _has_active(society, "protest"):
+    if n_alive > 0 and counters["protest"] / n_alive >= protest_event_threshold and not _has_active(society, "protest"):
         micro_events.append(_emit(society, "protest", source="behavior", severity=0.6,
-                                  description=f"行为涌现：{protests} 名 Agent 参与抗议"))
-        society.production_multiplier = max(0.5, society.production_multiplier - 0.1)
-    if n_alive > 0 and conflicts / n_alive >= conflict_event_threshold and not _has_active(society, "conflict"):
+                                  description=f"行为涌现：{counters['protest']} 名 Agent 参与抗议"))
+        society.production_multiplier = max(0.5, getattr(society, "production_multiplier", 1.0) - 0.1)
+    if n_alive > 0 and counters["conflict"] / n_alive >= conflict_event_threshold and not _has_active(society, "conflict"):
         micro_events.append(_emit(society, "conflict", source="behavior", severity=0.5,
-                                  description=f"行为涌现：群体间冲突 {conflicts} 起"))
-    if n_alive > 0 and migrations / n_alive >= migration_event_threshold and not _has_active(society, "migration"):
+                                  description=f"行为涌现：群体间冲突 {counters['conflict']} 起"))
+    if n_alive > 0 and counters["migrate"] / n_alive >= migration_event_threshold and not _has_active(society, "migration"):
         micro_events.append(_emit(society, "migration", source="behavior", severity=0.4,
-                                  description=f"行为涌现：{migrations} 名 Agent 迁移"))
+                                  description=f"行为涌现：{counters['migrate']} 名 Agent 迁移"))
 
     return micro_events
 
 
-def _do_trade(a: Agent, society, rng: random.Random, agent_map: dict) -> None:
-    network = getattr(society, "_network", None) or {}
-    nbrs = network.get(a.id, [])
+def _execute(a: Agent, act, ctx: dict, rng: random.Random, ledger, tick: int, counters: dict) -> None:
+    """执行单个行为：先 reserve 成本，成功后 commit；具体效果按 action 分发（§59, §60）。"""
+    # 1. 成本预扣（§60）
+    reserved: dict = {}
+    for res, amt in act.cost.items():
+        if amt <= 0:
+            continue
+        if not reserve(a, res, amt):
+            for r2, a2 in reserved.items():
+                release(a, r2, a2)
+            return
+        reserved[res] = amt
+    # 2. 成本结算
+    for res, amt in reserved.items():
+        commit(a, res, amt, ledger, f"action:{act.name}", tick)
+
+    # 3. 具体效果
+    name = act.name
+    if name == "work":
+        _do_work(a, ctx, ledger, tick)
+        counters["work"] += 1
+    elif name == "trade":
+        if _do_trade(a, ctx, rng, ledger, tick):
+            counters["trade"] += 1
+    elif name == "save":
+        _do_save(a, ctx, ledger, tick)
+        counters["hoard"] += 1
+    elif name == "consume":
+        _do_consume(a, ctx, ledger, tick)
+    elif name == "share":
+        if _do_share(a, ctx, rng, ledger, tick):
+            counters["share"] += 1
+    elif name == "cooperate":
+        a.status["anger"] = max(0.0, a.status.get("anger", 0.0) - 0.02)
+        a.status["trust_in_government"] = min(1.0, a.status.get("trust_in_government", 0.5) + 0.005)
+        counters["cooperate"] += 1
+    elif name == "protest":
+        a.status["anger"] = max(0.0, a.status.get("anger", 0.0) - 0.1)
+        counters["protest"] += 1
+    elif name == "migrate":
+        if _do_migrate(a, ctx, rng):
+            counters["migrate"] += 1
+    elif name == "rest":
+        a.resources.add("energy", act.expected_return.get("energy", 5.0))
+    elif name == "join_group":
+        _do_join_group(a, ctx, rng)
+    elif name == "leave_group":
+        _do_leave_group(a, ctx, tick)
+    elif name == "communicate":
+        pass  # 信息传播由 information 层处理（§29）
+
+
+# -- 各 action 的具体实现 ------------------------------------------------
+
+def _do_work(a: Agent, ctx: dict, ledger, tick: int) -> None:
+    """工作（§14）：消耗 energy/food（已结算），产出 money + food（生产，§16）。"""
+    econ = ctx["cfg"].get("economy", {})
+    pm = getattr(ctx["society"], "production_multiplier", 1.0)
+    productivity = 0.5 + a.personality["conscientiousness"] * 0.5
+    a.productivity = productivity
+    wage = econ.get("base_income", 3.0) * productivity * pm
+    food_prod = econ.get("food_production", 0.6) * productivity * pm
+    energy_prod = econ.get("energy_production", 0.06) * productivity * pm
+    a.resources.add("money", wage)
+    a.resources.add("food", food_prod)
+    a.resources.add("energy", energy_prod)
+    if ledger is not None:
+        ledger.record(source="production", target=a.id, resource="money",
+                      amount=round(wage, 4), reason="work", tick=tick)
+
+
+def _do_trade(a: Agent, ctx: dict, rng: random.Random, ledger, tick: int) -> bool:
+    """交易（§18–§20）：找 counterparty，按稀缺性定价，守恒转移。"""
+    agent_map = ctx["agent_map"]
+    nbrs = ctx["network"].get(a.id, [])
     if not nbrs:
-        return
-    nid = rng.choice(nbrs)
-    b = agent_map.get(nid)
-    if b is None or not b.alive:
-        return
-    # 食物换钱
-    a.resources.add("food", -5.0)
-    a.resources.add("money", 5.0)
-    b.resources.add("food", 5.0)
-    b.resources.add("money", -5.0)
+        return False
+    st = getattr(a, "resource_state", {}) or {}
+    price = ctx.get("food_price")
+    if price is None:  # 单测直接调用时的回退路径
+        price = _food_price(ctx)
+    qty = 5.0
+
+    if st.get("food_pressure", 0.0) > 0.5 and a.resources.available("money") > 10:
+        # 买方：用钱买食物
+        sellers = [agent_map[n] for n in nbrs if n in agent_map and agent_map[n].alive
+                   and (agent_map[n].resource_state or {}).get("food_pressure", 0.0) < 0.4
+                   and agent_map[n].resources.available("food") > 30]
+        if not sellers:
+            return False
+        b = rng.choice(sellers)
+        cost = price * qty
+        if transfer(a, b, "money", cost, ledger, "trade_buy", tick):
+            transfer(b, a, "food", qty, ledger, "trade_sell", tick)
+            return True
+        return False
+    elif st.get("food_pressure", 0.0) < 0.3 and a.resources.available("food") > 40:
+        # 卖方：卖食物换钱
+        buyers = [agent_map[n] for n in nbrs if n in agent_map and agent_map[n].alive
+                  and (agent_map[n].resource_state or {}).get("food_pressure", 0.0) > 0.5
+                  and agent_map[n].resources.available("money") > 10]
+        if not buyers:
+            return False
+        b = rng.choice(buyers)
+        if transfer(a, b, "food", qty, ledger, "trade_sell", tick):
+            transfer(b, a, "money", price * qty, ledger, "trade_buy", tick)
+            return True
+    return False
 
 
-def _do_migrate(a: Agent, society, cfg: dict, rng: random.Random) -> None:
-    """Agent 迁移到另一个 region（§47）。"""
-    regions = cfg.get("regions", {}).get("list", ["A", "B", "C"])
+def _food_price(ctx: dict) -> float:
+    """价格（§20）：base × scarcity。全局食物越稀缺，价格越高。"""
+    cfg = ctx["cfg"]
+    base = cfg.get("economy", {}).get("trade_base_price", 1.0)
+    agents = [x for x in ctx["society"].agents if x.alive]
+    mean_food = sum(x.resources.available("food") for x in agents) / max(len(agents), 1)
+    food_critical = cfg.get("economy", {}).get("food_critical", 20.0)
+    scarcity = food_critical / max(mean_food, 1.0)
+    return base * max(0.5, min(3.0, scarcity))
+
+
+def _do_save(a: Agent, ctx: dict, ledger, tick: int) -> None:
+    """储蓄（§10, §40）：money → property（长期安全）。
+
+    v0.4.1：单次上限 20%→5%、绝对上限 10→2。原速率下储蓄把流通货币
+    全部冻结进 illiquid property（money 5 天内 500→2），是流动性死亡主因。
+    """
+    amt = min(a.resources.available("money") * 0.05, 2.0)
+    if amt > 0:
+        a.resources.add("money", -amt)
+        a.resources.add("property", amt)
+        if ledger is not None:
+            ledger.record(source=a.id, target=a.id, resource="money",
+                          amount=amt, reason="save", tick=tick)
+
+
+def _do_consume(a: Agent, ctx: dict, ledger, tick: int) -> None:
+    """消费（§10）：money → food/energy。"""
+    amt = min(a.resources.available("money"), 2.0)
+    if amt > 0:
+        a.resources.add("money", -amt)
+        a.resources.add("food", amt * 0.4)
+        a.resources.add("energy", amt * 0.4)
+
+
+def _do_share(a: Agent, ctx: dict, rng: random.Random, ledger, tick: int) -> bool:
+    """分享（§21–§24）：向群体资源池或低资源邻居转移。
+
+    v0.4.1：群体池按人均存量封顶——池子充裕时改为直接帮助邻居。
+    原实现无视池存量持续注入，群体池成为食物黑洞（Agent 挨饿、池里囤粮）。
+    """
+    groups = ctx["groups"]
+    ident = getattr(a, "identity", None)
+    if groups is not None and ident is not None and ident.primary_group:
+        g = groups.get(ident.primary_group)
+        if g is not None and g.is_alive():
+            pool_per_member = g.resources.get("food", 0.0) / max(g.size(), 1)
+            if pool_per_member < 40.0:  # 池子还缺粮才存入
+                amt = min(a.resources.available("food") * 0.1, 5.0)
+                if amt > 0:
+                    a.resources.add("food", -amt)
+                    g.resources["food"] = g.resources.get("food", 0.0) + amt
+                    if ledger is not None:
+                        ledger.record(source=a.id, target=g.id, resource="food",
+                                      amount=amt, reason="group_share", tick=tick)
+                    return True
+    # 无群体 → 向低资源邻居分享
+    agent_map = ctx["agent_map"]
+    nbrs = ctx["network"].get(a.id, [])
+    for nid in nbrs:
+        b = agent_map.get(nid)
+        if b is None or not b.alive:
+            continue
+        if (b.resource_state or {}).get("food_pressure", 0.0) > 0.7:
+            amt = min(a.resources.available("food") * 0.1, 3.0)
+            if amt > 0 and transfer(a, b, "food", amt, ledger, "share", tick):
+                return True
+    return False
+
+
+def _do_migrate(a: Agent, ctx: dict, rng: random.Random) -> bool:
+    """迁移（§31–§33）：成本已在 _execute 结算（money/energy）。"""
+    regions = ctx["cfg"].get("regions", {}).get("list", ["A", "B", "C"])
     cur = getattr(a, "location", "A")
     others = [r for r in regions if r != cur]
-    if others:
-        a.location = rng.choice(others)
+    if not others:
+        return False
+    a.location = rng.choice(others)
+    return True
+
+
+def _do_join_group(a: Agent, ctx: dict, rng: random.Random) -> None:
+    """加入群体（§10）：优先加入同区域的活跃群体；已在的群体跳过。"""
+
+    groups = ctx["groups"]
+    ident = getattr(a, "identity", None)
+    if groups is None or ident is None:
+        return
+    if ident.membership_count() >= 3:  # 与 compute_feasibility 的上限一致（§51 有界多身份）
+        return
+    loc = getattr(a, "location", "A")
+    cands = [g for g in groups.active()
+             if not ident.in_group(g.id) and g.size() < 200 and g.region == loc]
+    if not cands:
+        cands = [g for g in groups.active() if not ident.in_group(g.id) and g.size() < 200]
+    if not cands:
+        return
+    g = rng.choice(cands)
+    g.members.add(a.id)
+    ident.add_group(g.id)  # 走 Identity 通道，保证 group_memberships/primary_group 一致
+
+
+def _do_leave_group(a: Agent, ctx: dict, tick: int = 0) -> None:
+    """离开群体（§10）：退出 primary group，memberships 同步更新，记录退群时刻。"""
+    ident = getattr(a, "identity", None)
+    groups = ctx["groups"]
+    if ident is None or groups is None or not ident.primary_group:
+        return
+    gid = ident.primary_group
+    g = groups.get(gid)
+    if g is not None:
+        g.members.discard(a.id)
+    ident.remove_group(gid)  # 自动把 primary 切换到其余 membership（如有）
+    a.status["last_leave_group_tick"] = tick  # 供 formation 退群冷却使用
 
 
 def _inter_group_conflict(society, registry, agent_map: dict, rng: random.Random, cfg: dict) -> int:
@@ -137,7 +316,6 @@ def _inter_group_conflict(society, registry, agent_map: dict, rng: random.Random
     if len(groups) < 2:
         return 0
     conflicts = 0
-    # 采样若干群体对（避免 O(G²) 全量）
     for i in range(min(len(groups) - 1, 3)):
         a_g = groups[i]
         for j in range(i + 1, min(len(groups), i + 3)):

@@ -40,6 +40,16 @@ class Agent:
     identity: Identity = field(default_factory=Identity)  # 社会身份（≠ ideology §14）
     location: str = "A"                                    # region_id（§47）
     beliefs: dict = field(default_factory=dict)            # subject -> Belief（§28）
+    # v0.4.1 resource layer (§6, §15, §25, §46)
+    resource_state: dict = field(default_factory=dict)     # security/pressure/surplus/deficit/各资源压力
+    employment_status: str = "self_employed"               # employed/unemployed/self_employed/dependent（§15）
+    occupation: str = "worker"                             # worker/producer/trader/service/government（§15）
+    productivity: float = 0.5                              # 生产效率（§14, §15）
+    employer: Optional[str] = None                         # 雇主 id（§15）
+    relative_deprivation: float = 0.0                      # 相对剥夺（§25, §26）
+    current_action: str = ""                               # 本 tick 行为（Inspector §46）
+    action_utility: float = 0.0
+    action_feasibility: float = 0.0
 
     def __post_init__(self) -> None:
         self.status.setdefault("anger", 0.0)
@@ -84,6 +94,19 @@ class Agent:
             "identity": self.identity.as_dict(),
             "location": self.location,
             "beliefs": {k: v.as_dict() for k, v in self.beliefs.items()},
+            # v0.4.1: 资源层（§6, §7, §15, §25, §46）
+            "resource_state": dict(self.resource_state),
+            "reserved_resources": {k: round(v, 2) for k, v in self.resources.reserved.items()},
+            "employment": {
+                "status": self.employment_status,
+                "occupation": self.occupation,
+                "productivity": round(self.productivity, 4),
+                "employer": self.employer,
+            },
+            "relative_deprivation": round(self.relative_deprivation, 4),
+            "current_action": self.current_action,
+            "action_utility": round(self.action_utility, 4),
+            "action_feasibility": round(self.action_feasibility, 4),
         }
 
     def brief(self) -> dict:
@@ -110,4 +133,7 @@ class Agent:
             "vy": round(self.political_velocity[1], 5),
             "vz": round(self.political_velocity[2], 5),
             "inertia": round(self.political_inertia, 3),
+            # v0.4.1: 资源安全/压力（§45 动力学诊断着色）
+            "resource_security": round(self.resource_state.get("security", 0.0), 3),
+            "resource_pressure": round(self.resource_state.get("pressure", 0.0), 3),
         }

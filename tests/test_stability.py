@@ -18,8 +18,10 @@ from configs.loader import default_society_config                # noqa: E402
 def make_engine(agents=500, seed=42):
     cfg = default_society_config()
     cfg["population"]["count"] = agents
-    # v0.4: 本文件是 v0.3.1 稳定性测试，关闭 v0.4 特性以隔离 v0.3.1 动力学
-    for key in ("behavior", "groups", "identity", "information"):
+    # v0.4.1: behavior 系统就是生产引擎（无 behavior = 无收入 = 永久饥荒，
+    # 危机后食物无法恢复），不能再整体关闭。只关闭群体/身份/信息以聚焦
+    # 核心动力学；行为经济是生产的必要部分。
+    for key in ("groups", "identity", "information"):
         cfg.setdefault(key, {})["enabled"] = False
     eng = SimulationEngine()
     s = eng.create_society(cfg, seed=seed)
@@ -73,9 +75,11 @@ class TestNormalSociety(unittest.TestCase):
             if a.alive:
                 self.assertGreaterEqual(a.resources["food"], 0.0)
                 self.assertGreaterEqual(a.resources["money"], 0.0)
-        # 无永久抗议（所有 protest 事件最终解决）
+        # 无永久抗议（v0.4.1：抗议可由行为内生重复涌现，断言从「无活动抗议」
+        # 改为「无单个抗议永久存活」——所有活动抗议都必须很年轻，周转正常）
         active_protests = [e for e in s.events.events if e.type == "protest" and e.is_active]
-        self.assertEqual(len(active_protests), 0)
+        for e in active_protests:
+            self.assertLess(s.clock.tick - e.tick, 40, "存在超过 2×duration 的永久抗议")
 
 
 class TestFoodCrisis(unittest.TestCase):
@@ -91,20 +95,20 @@ class TestFoodCrisis(unittest.TestCase):
         eng.inject_event(s.society_id, "natural_disaster", severity=0.7)
         run(eng, s, 50)
         food_low = statistics.mean(a.resources["food"] for a in s.agents)
+        temp_crisis = s.metrics()["social_temperature"]
         # 危机应造成食物下降
         self.assertLess(food_low, food_before)
+        # 危机时刻温度上升
+        self.assertGreater(temp_crisis, temp_before)
 
-        # 危机峰值：温度上升（信息传播 + 极化 + 抗议需要时间发酵）
-        run(eng, s, 150)
-        temp_peak = s.metrics()["social_temperature"]
-        self.assertGreater(temp_peak, temp_before)
-
-        # 恢复：长时间后食物回升、温度从峰值回落
-        run(eng, s, 300)
+        # 恢复：长时间后食物回升（v0.4.1：行为系统会内生涌现抗议周期，
+        # 温度按自身节奏波动，「固定采样点温度从峰值回落」不再是有效不变量；
+        # 有效不变量是：食物真实恢复 + 温度不失控）
+        run(eng, s, 450)
         food_after = statistics.mean(a.resources["food"] for a in s.agents)
         temp_after = s.metrics()["social_temperature"]
         self.assertGreater(food_after, food_low, "食物未恢复")
-        self.assertLess(temp_after, temp_peak, "温度未从峰值回落")
+        self.assertLess(temp_after, 0.6, "温度失控（超过 TENSION 阈值）")
 
         # 事件最终衰减解决
         self.assertFalse(any(e.type == "natural_disaster" and e.is_active for e in s.events.events))
@@ -155,11 +159,14 @@ class TestEventLifecycle(unittest.TestCase):
 
     def test_events_resolve_over_time(self):
         eng, s = make_engine(agents=300, seed=5)
+        inject_tick = s.clock.tick
         eng.inject_event(s.society_id, "protest", severity=0.8)
         run(eng, s, 200)
-        # 抗议应在持续时间结束后解决
-        active = [e for e in s.events.events if e.type == "protest" and e.is_active]
-        self.assertEqual(len(active), 0, "抗议事件未自行结束")
+        # 注入的抗议应在持续时间结束后解决（v0.4.1：行为系统可能内生涌现
+        # 新的抗议事件——它们各自也有自己的生命周期；断言注入的那个已解决）
+        stale = [e for e in s.events.events
+                 if e.type == "protest" and e.is_active and e.tick <= inject_tick]
+        self.assertEqual(len(stale), 0, "注入的抗议事件未自行结束")
 
 
 if __name__ == "__main__":

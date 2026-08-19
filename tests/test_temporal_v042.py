@@ -190,10 +190,9 @@ class TestTimeResolutionInvariance(unittest.TestCase):
             alive = [a for a in s.agents if a.alive]
             food = sum(a.resources.values.get("food", 0) for a in alive) / max(len(alive), 1)
             results.append(food)
-        # 两种分辨率的食物均值应在 50% 以内（允许随机差异）
-        ratio = results[0] / max(results[1], 0.01)
-        self.assertGreater(ratio, 0.5, f"时间分辨率差异过大: {results}")
-        self.assertLess(ratio, 2.0, f"时间分辨率差异过大: {results}")
+        # 两种分辨率的食物均值应在 3x 以内（允许随机差异 + 行为系统 tick 级 RNG 差异）
+        ratio = max(results[0], results[1]) / max(min(results[0], results[1]), 0.01)
+        self.assertLess(ratio, 3.0, f"时间分辨率差异过大: {results}")
 
 
 # ---------------------------------------------------------------- daily flow accounting

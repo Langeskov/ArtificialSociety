@@ -11,6 +11,7 @@
 - Stock-flow metrics（§42）：buffer days 计算
 """
 
+import math
 import random
 import sys
 import unittest
@@ -22,6 +23,8 @@ sys.path.insert(0, str(ROOT))
 from configs.loader import default_society_config                    # noqa: E402
 from engine.simulation.engine import SimulationEngine               # noqa: E402
 from engine.crisis.tracker import CrisisTracker, CrisisState        # noqa: E402
+from engine.crisis.memory import CrisisMemory                       # noqa: E402
+from engine.crisis.diagnostics import OscillationDetector, FeedbackDiagnostics  # noqa: E402
 
 
 def _make_engine(agents=300, seed=42, **overrides):
@@ -227,3 +230,72 @@ class TestBaselineStability(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# ---------------------------------------------------------------- crisis memory
+
+class TestCrisisMemory(unittest.TestCase):
+    """§22-§23: 危机记忆衰减。"""
+
+    def test_memory_records_and_decays(self):
+        """记录危机后记忆增加，随时间衰减。"""
+        cm = CrisisMemory()
+        cm.record_protest(0.8)
+        self.assertGreater(cm.protest_memory, 0.0)
+        for _ in range(1000):
+            cm.decay()
+        self.assertLess(cm.protest_memory, 0.2, "记忆应衰减")
+
+    def test_food_crisis_memory(self):
+        """粮食危机记忆。"""
+        cm = CrisisMemory()
+        cm.record_food_crisis(0.9)
+        self.assertGreater(cm.food_crisis_memory, 0.0)
+
+    def test_overall_tension(self):
+        """综合紧张度。"""
+        cm = CrisisMemory()
+        cm.record_protest(0.5)
+        cm.record_food_crisis(0.5)
+        self.assertGreater(cm.overall_tension, 0.0)
+        self.assertLessEqual(cm.overall_tension, 1.0)
+
+
+# ---------------------------------------------------------------- oscillation detector
+
+class TestOscillationDetector(unittest.TestCase):
+    """§31: 振荡检测。"""
+
+    def test_no_oscillation_on_constant(self):
+        """常数不应检测为振荡。"""
+        od = OscillationDetector(window_size=100, min_cycles=3)
+        for _ in range(200):
+            od.update(50.0)
+        result = od.detect()
+        self.assertFalse(result["detected"])
+
+    def test_detects_sinusoidal(self):
+        """正弦波应被检测为振荡。"""
+        od = OscillationDetector(window_size=200, min_cycles=2)
+        for i in range(300):
+            # 使用短周期（20 ticks）使峰值更尖锐，便于整数采样检测
+            od.update(50.0 + 20.0 * math.sin(2 * math.pi * i / 20))
+        result = od.detect()
+        self.assertTrue(result["detected"])
+        self.assertGreater(result["period_ticks"], 0)
+
+
+# ---------------------------------------------------------------- feedback diagnostics
+
+class TestFeedbackDiagnostics(unittest.TestCase):
+    """§33-§34: 反馈环诊断。"""
+
+    def test_returns_analysis(self):
+        """反馈诊断返回结构化结果。"""
+        fd = FeedbackDiagnostics(window_size=100)
+        for i in range(200):
+            fd.update(50.0 + 10 * math.sin(i * 0.1), 0.3, 5, 0.9)
+        result = fd.analyze()
+        self.assertIn("positive_feedback", result)
+        self.assertIn("negative_feedback", result)
+        self.assertIn("dominant", result)

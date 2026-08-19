@@ -130,10 +130,24 @@ class SimulationEngine:
             update_regions(s, s.config)
             # 14. LLM 决策（默认关闭 §32）
             self._maybe_llm_decisions(s, provider, rng)
-            # 15. 记忆衰减（§21）
+            # 15. 记忆衰减（§21）+ 危机记忆（v0.4.2 §22-§23）
             for a in s.agents:
                 if a.alive and a.recent_events:
                     decay_memory(a, memory_decay, memory_size)
+            # 危机记忆衰减 + 记录新危机
+            s.crisis_memory.decay()
+            cm = s.crisis_manager
+            if cm.food.is_crisis():
+                s.crisis_memory.record_food_crisis(cm.food.severity)
+            if cm.protest.is_crisis():
+                s.crisis_memory.record_protest(cm.protest.severity)
+            # v0.4.2 §31/§34: 振荡检测 + 反馈诊断
+            alive_agents = [a for a in s.agents if a.alive]
+            if alive_agents:
+                avg_food = sum(a.resources.values.get("food", 0) for a in alive_agents) / len(alive_agents)
+                avg_anger = sum(a.status.get("anger", 0) for a in alive_agents) / len(alive_agents)
+                s.oscillation_detector.update(avg_food)
+                s.feedback_diagnostics.update(avg_food, avg_anger, 0, s.production_multiplier)
 
         metrics = s.metrics()
         s.metrics_history.append(metrics)

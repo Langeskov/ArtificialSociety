@@ -24,6 +24,8 @@ from ..group.group import GroupRegistry
 from ..economy.transaction import ResourceLedger
 from ..economy.region import RegionRegistry
 from ..crisis.tracker import CrisisManager
+from ..crisis.memory import CrisisMemory
+from ..crisis.diagnostics import OscillationDetector, FeedbackDiagnostics
 
 
 @dataclass
@@ -53,6 +55,9 @@ class Society:
     regions: Optional[RegionRegistry] = None                            # §31
     # v0.4.2: crisis state machine + resource flow accounting
     crisis_manager: CrisisManager = field(default_factory=CrisisManager)
+    crisis_memory: CrisisMemory = field(default_factory=CrisisMemory)
+    oscillation_detector: OscillationDetector = field(default_factory=OscillationDetector)
+    feedback_diagnostics: FeedbackDiagnostics = field(default_factory=FeedbackDiagnostics)
     production_disruption: float = 0.0  # v0.4.2 §19: 临时干扰（非永久 ratchet）
     resource_flow: dict = field(default_factory=lambda: {
         "food_produced": 0.0, "food_consumed": 0.0,

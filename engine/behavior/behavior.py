@@ -71,7 +71,10 @@ def step_behavior(society, cfg: dict, rng: random.Random) -> list:
     if n_alive > 0 and counters["protest"] / n_alive >= protest_event_threshold and not _has_active(society, "protest"):
         micro_events.append(_emit(society, "protest", source="behavior", severity=0.6,
                                   description=f"行为涌现：{counters['protest']} 名 Agent 参与抗议"))
-        society.production_multiplier = max(0.5, getattr(society, "production_multiplier", 1.0) - 0.1)
+        # v0.4.2 §19: 使用临时干扰而非永久 ratchet
+        # 原: society.production_multiplier = max(0.5, pm - 0.1)
+        # 新: 累加临时干扰，由 step_production_recovery 自动衰减
+        society.production_disruption = min(0.4, getattr(society, "production_disruption", 0.0) + 0.08)
     if n_alive > 0 and counters["conflict"] / n_alive >= conflict_event_threshold and not _has_active(society, "conflict"):
         micro_events.append(_emit(society, "conflict", source="behavior", severity=0.5,
                                   description=f"行为涌现：群体间冲突 {counters['conflict']} 起"))
@@ -137,14 +140,19 @@ def _execute(a: Agent, act, ctx: dict, rng: random.Random, ledger, tick: int, co
 # -- 各 action 的具体实现 ------------------------------------------------
 
 def _do_work(a: Agent, ctx: dict, ledger, tick: int) -> None:
-    """工作（§14）：消耗 energy/food（已结算），产出 money + food（生产，§16）。"""
+    """工作（§14）：消耗 energy/food（已结算），产出 money + food（生产，§16）。
+
+    v0.4.2 §19: 使用有效乘数 = base_multiplier - disruption。
+    """
     econ = ctx["cfg"].get("economy", {})
     pm = getattr(ctx["society"], "production_multiplier", 1.0)
+    disruption = getattr(ctx["society"], "production_disruption", 0.0)
+    effective_pm = max(0.3, pm - disruption)  # 有效乘数（§19）
     productivity = 0.5 + a.personality["conscientiousness"] * 0.5
     a.productivity = productivity
-    wage = econ.get("base_income", 3.0) * productivity * pm
-    food_prod = econ.get("food_production", 0.6) * productivity * pm
-    energy_prod = econ.get("energy_production", 0.06) * productivity * pm
+    wage = econ.get("base_income", 3.0) * productivity * effective_pm
+    food_prod = econ.get("food_production", 0.6) * productivity * effective_pm
+    energy_prod = econ.get("energy_production", 0.06) * productivity * effective_pm
     a.resources.add("money", wage)
     a.resources.add("food", food_prod)
     a.resources.add("energy", energy_prod)

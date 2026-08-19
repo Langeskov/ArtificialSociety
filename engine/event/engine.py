@@ -79,33 +79,33 @@ def _has_active(chain: EventChain, event_type: str) -> bool:
 
 
 def _apply_effects(society, event: Event, agents: Sequence[Agent], rng: random.Random) -> None:
-    """事件的实际后果：冲击会压低生产/资源，恢复机制（§13）随后把系统拉回。"""
-    pm = society.production_multiplier
+    """事件的实际后果（v0.4.2 §19: 临时干扰而非永久 ratchet）。"""
     et = event.type
     sev = max(0.2, event.severity)
     if et == "natural_disaster":
-        society.production_multiplier = max(0.4, pm * (1.0 - 0.3 * sev))
+        society.production_disruption = min(0.5, getattr(society, "production_disruption", 0.0) + 0.2 * sev)
         for a in agents:
             if a.alive:
                 a.resources.add("food", -a.resources.values.get("food", 0.0) * 0.85 * sev)
     elif et == "economic_crisis":
-        society.production_multiplier = max(0.5, pm * (1.0 - 0.25 * sev))
+        society.production_disruption = min(0.4, getattr(society, "production_disruption", 0.0) + 0.15 * sev)
         for a in agents:
             if a.alive:
                 a.resources.add("money", -a.resources.values.get("money", 0.0) * 0.2 * sev)
     elif et == "war":
-        society.production_multiplier = max(0.4, pm * (1.0 - 0.4 * sev))
+        society.production_disruption = min(0.5, getattr(society, "production_disruption", 0.0) + 0.25 * sev)
         for a in agents:
             if a.alive:
                 a.resources.add("food", -a.resources.values.get("food", 0.0) * 0.2 * sev)
     elif et == "conflict":
-        society.production_multiplier = max(0.6, pm * (1.0 - 0.15 * sev))
+        society.production_disruption = min(0.3, getattr(society, "production_disruption", 0.0) + 0.1 * sev)
     elif et == "resource_boom":
         for a in agents:
             if a.alive:
                 a.resources.add("money", a.resources.values.get("money", 0.0) * 0.15 * sev)
     elif et == "technology_breakthrough":
-        society.production_multiplier = min(1.2, pm * (1.0 + 0.12 * sev))
+        # 技术突破：临时提升生产效率
+        society.production_disruption = max(-0.2, getattr(society, "production_disruption", 0.0) - 0.1 * sev)
 
 
 def step_events(society, cfg: dict, rng: random.Random, resolved: Optional[list] = None) -> list:
@@ -147,17 +147,31 @@ def step_events(society, cfg: dict, rng: random.Random, resolved: Optional[list]
                 intensity=0.4,
             ))
 
-    # --- 粮食短缺（临时，有生命周期） --------------------------------------
+    # --- 粮食短缺（v0.4.2 §14–§16: 使用 CrisisManager 的状态机） ---
     starving = sum(1 for a in agents if a.resources.is_starving())
-    starving_ratio = starving / len(agents)
-    if starving_ratio > 0.25 and not _has_active(chain, "food_shortage") and rng.random() < 0.15 + starving_ratio * 0.5:
-        new_events.append(chain.make(
-            tick, "food_shortage",
-            severity=min(1.0, starving_ratio),
-            description=f"粮食短缺：{starving}/{len(agents)} 名成员处于饥饿状态",
-            effects={"starving_ratio": round(starving_ratio, 3)},
-            duration=DURATION["food_shortage"],
-        ))
+    starving_ratio = starving / len(agents) if len(agents) > 0 else 0.0
+    cm = getattr(society, "crisis_manager", None)
+    if cm is not None:
+        cm.food.update(starving_ratio, tick, cfg.get("ticks_per_day", 100))
+        # 只在状态转换时产生事件（不是每 tick 检查阈值）
+        if cm.food.state.value == "ACTIVE" and cm.food.duration_ticks == 1:
+            new_events.append(chain.make(
+                tick, "food_shortage",
+                severity=min(1.0, starving_ratio),
+                description=f"粮食短缺：{starving}/{len(agents)} 名成员处于饥饿状态",
+                effects={"starving_ratio": round(starving_ratio, 3)},
+                duration=DURATION["food_shortage"],
+            ))
+    else:
+        # fallback: 旧逻辑
+        if starving_ratio > 0.25 and not _has_active(chain, "food_shortage") and rng.random() < 0.15 + starving_ratio * 0.5:
+            new_events.append(chain.make(
+                tick, "food_shortage",
+                severity=min(1.0, starving_ratio),
+                description=f"粮食短缺：{starving}/{len(agents)} 名成员处于饥饿状态",
+                effects={"starving_ratio": round(starving_ratio, 3)},
+                duration=DURATION["food_shortage"],
+            ))
 
     # --- 经济危机（罕见，临时） --------------------------------------------
     if not _has_active(chain, "economic_crisis") and temperature > 0.5 and rng.random() < 0.01 * modifier:
@@ -171,18 +185,34 @@ def step_events(society, cfg: dict, rng: random.Random, resolved: Optional[list]
         _apply_effects(society, crisis, agents, rng)
 
     # --- 抗议（§12：临时，产生生产代价） -----------------------------------
-    # 概率由温度调制，无硬阈值；同一时间只允许一场抗议。
-    if not _has_active(chain, "protest") and temperature > 0.45:
-        p = 0.01 * modifier
-        if rng.random() < p:
+    # v0.4.2: 使用 CrisisManager 状态机 + 临时干扰
+    protest_ratio = 0.0
+    if cm is not None:
+        # 计算抗议比例（基于 anger + 低信任）
+        angry_ratio = sum(1 for a in agents if a.status.get("anger", 0.0) > 0.3) / max(len(agents), 1)
+        protest_ratio = angry_ratio
+        cm.protest.update(angry_ratio, tick, cfg.get("ticks_per_day", 100))
+        if cm.protest.state.value == "ACTIVE" and cm.protest.duration_ticks == 1:
             new_events.append(chain.make(
                 tick, "protest",
                 severity=temperature,
                 description="不满情绪上升引发公众抗议",
                 duration=rng.randint(10, 30),
             ))
-            # 临时生产 / 流动性代价（§12）
-            society.production_multiplier = max(0.5, society.production_multiplier - 0.15)
+            # v0.4.2 §19: 临时干扰而非永久 ratchet
+            society.production_disruption = min(0.4, getattr(society, "production_disruption", 0.0) + 0.08)
+    else:
+        # fallback: 旧逻辑
+        if not _has_active(chain, "protest") and temperature > 0.45:
+            p = 0.01 * modifier
+            if rng.random() < p:
+                new_events.append(chain.make(
+                    tick, "protest",
+                    severity=temperature,
+                    description="不满情绪上升引发公众抗议",
+                    duration=rng.randint(10, 30),
+                ))
+                society.production_disruption = min(0.4, getattr(society, "production_disruption", 0.0) + 0.08)
 
     # --- 政治运动（当存在长期不满但尚无运动时） ----------------------------
     if not _has_active(chain, "political_movement") and temperature > 0.4 and rng.random() < 0.005 * modifier:

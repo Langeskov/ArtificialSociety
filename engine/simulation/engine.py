@@ -27,7 +27,7 @@ from ..politics.politics import step_politics
 from ..event.engine import step_events
 from ..relationship.relationship import build_network
 from ..dynamics.decay import decay_events, decay_memory
-from ..dynamics.recovery import step_recovery
+from ..economy.economy import step_production_recovery
 from ..dynamics.stability import boundary_concentration
 from ..group.formation import step_formation
 from ..group.lifecycle import step_lifecycle
@@ -85,9 +85,10 @@ class SimulationEngine:
             s.clock.advance(1)
             # 1. 经济基础代谢 + 税收（v0.4.1 §2：收入由 work 行为产生，不再每 tick 固定）
             collect_tax = (s.clock.tick % s.clock.ticks_per_day == 0)
-            step_economy(s.agents, s.config, rng, s.production_multiplier, collect_tax)
+            dt_days = s.clock.dt_days
+            flow = step_economy(s.agents, s.config, rng, s.production_multiplier, collect_tax, dt_days)
             # 2. 生产恢复（§38）
-            step_recovery(s, s.config)
+            step_production_recovery(s, s.config, dt_days)
             # 3. 资源安全/压力更新（v0.4.1 §2–§6：连续信号）
             for a in s.agents:
                 if a.alive:

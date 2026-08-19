@@ -23,6 +23,7 @@ from ..dynamics.stability import CollapseDetector
 from ..group.group import GroupRegistry
 from ..economy.transaction import ResourceLedger
 from ..economy.region import RegionRegistry
+from ..crisis.tracker import CrisisManager
 
 
 @dataclass
@@ -50,6 +51,15 @@ class Society:
     # v0.4.1 resource layer
     resource_ledger: ResourceLedger = field(default_factory=ResourceLedger)  # §62
     regions: Optional[RegionRegistry] = None                            # §31
+    # v0.4.2: crisis state machine + resource flow accounting
+    crisis_manager: CrisisManager = field(default_factory=CrisisManager)
+    production_disruption: float = 0.0  # v0.4.2 §19: 临时干扰（非永久 ratchet）
+    resource_flow: dict = field(default_factory=lambda: {
+        "food_produced": 0.0, "food_consumed": 0.0,
+        "food_traded_in": 0.0, "food_traded_out": 0.0,
+        "energy_produced": 0.0, "energy_consumed": 0.0,
+        "money_earned": 0.0, "money_taxed": 0.0,
+    })
 
     def __post_init__(self) -> None:
         self.clock = Clock(

@@ -28,17 +28,25 @@ population:
   ai_levels: { level0: 0.90, level1: 0.09, level2: 0.0, level3: 0.01 }
 
 economy:
+  # v0.4.2 §5: 所有资源率统一为 per-day，引擎按 dt_days 换算到 per-tick
+  # 这样改变 ticks_per_day 不会改变社会真实资源流量（§7 时间分辨率不变性）
+  daily:
+    food_consumption_per_agent: 5.0     # 每 agent 每天消耗食物（原 0.05/tick × 100 ticks/day）
+    energy_consumption_per_agent: 3.0   # 每 agent 每天消耗能量（原 0.03/tick × 100 ticks/day）
   base_income: 3.0
   income_sigma: 2.0
-  food_consumption: 0.05
-  energy_consumption: 0.03
-  tax_rate: 0.01   # 按日税率（v0.4.1 从 0.08 下调：收入改由 work 行为产生，高税率会抽干流动性）
+  tax_rate: 0.01
   redistribution: 0.5
-  food_production: 0.6   # work 行为产出系数（v0.4.1：~15% 工作率即可覆盖代谢）
+  food_production: 0.6
   energy_production: 0.06
   food_critical: 20.0
   recovery_rate: 0.05
-  trade_base_price: 1.0   # v0.4.1 §20：食物基础价格（稀缺度加成在引擎内计算）
+  trade_base_price: 1.0
+  # v0.4.2 §19: production_multiplier 恢复动力学
+  recovery:
+    damping: 0.85           # 恢复阻尼：越接近 1.0 恢复越慢（§18 防过冲）
+    max_rate_per_day: 0.15  # 每天最大恢复幅度
+    disruption_decay: 0.92  # 临时干扰的衰减率（per tick）
 
 politics:
   movement_strength: 0.01
@@ -160,6 +168,18 @@ events:
   decay_rate: 0.03
   default_duration: 20
   resolution_threshold: 0.05
+  # v0.4.2 §14–§16: 危机状态机参数
+  crisis:
+    food:
+      trigger_threshold: 0.25    # hunger_ratio > 25% → crisis starts (§14)
+      resolve_threshold: 0.12    # hunger_ratio < 12% → crisis resolves
+      trigger_persistence_ticks: 50  # 条件持续 50 ticks（≈12 小时）才触发（§15）
+      cooldown_days: 2           # 解决后 2 天内不重新触发（§16）
+    protest:
+      trigger_threshold: 0.15
+      resolve_threshold: 0.08
+      trigger_persistence_ticks: 30
+      cooldown_days: 2
 
 stability:
   collapse_variance_threshold: 0.02

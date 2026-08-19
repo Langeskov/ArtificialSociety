@@ -154,6 +154,31 @@ membership 爆炸等及其修复）。
 
 新增 API：`GET /api/society/{id}/ledger`（资源流水账）、`GET /api/society/{id}/regions`（区域经济）。
 
+## v0.4.2 时间与资源动力学校准（Temporal & Resource Dynamics Calibration）
+
+解决 v0.4.1 的两个结构性问题：**资源危机振荡**（shortage→protest→recovery→shortage 周期）和 **X 轴极化**（重复危机推动 Agent 集中到两端）。
+
+见 `docs/temporal_model_v0.4.2.md`。
+
+| 子系统 | 核心机制 |
+|---|---|
+| **Unified Clock**（`engine/simulation/clock.py`） | simulated_days / dt_days / hour_of_day，所有模块统一时间理解 |
+| **Delta-Time Economy**（`engine/economy/economy.py`） | daily rate × dt_days，改变 ticks_per_day 不改变资源流量 |
+| **Crisis State Machine**（`engine/crisis/tracker.py`） | NORMAL→WARNING→ACTIVE→SEVERE→RECOVERING→COOLDOWN，hysteresis + persistence + cooldown |
+| **Crisis Memory**（`engine/crisis/memory.py`） | protest/food/economic 记忆指数衰减，影响后续行为 |
+| **Feedback Diagnostics**（`engine/crisis/diagnostics.py`） | 正/负反馈环检测 + 振荡周期检测 |
+| **Production Disruption**（§19） | 临时干扰自动衰减，非永久 ratchet |
+
+关键设计：
+- **Hysteresis**（§14）：trigger_threshold > resolve_threshold，防反复开关
+- **Persistence**（§15）：条件持续 N ticks 才触发，短暂波动不升级
+- **Cooldown**（§16）：解决后 N 天内不重新触发
+- **Damped Recovery**（§17-§18）：阻尼渐进恢复，防过冲
+
+```powershell
+.\\.venv\\Scripts\\python.exe -m pytest tests\\test_temporal_v042.py -v   # 19 个时间/危机测试
+```
+
 ## 系统架构（六层）
 
 ```

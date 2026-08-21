@@ -37,8 +37,8 @@ economy:
   income_sigma: 2.0
   tax_rate: 0.01
   redistribution: 0.5
-  food_production: 0.6
-  energy_production: 0.06
+  food_production: 1.5
+  energy_production: 0.10
   food_critical: 20.0
   recovery_rate: 0.05
   trade_base_price: 1.0
@@ -198,3 +198,6 @@ axes:
   x: { name: "经济自由 ↔ 经济管控", positive: "经济自由", negative: "经济管控" }
   y: { name: "自由 ↔ 权威", positive: "权威", negative: "自由" }
   z: { name: "个人主义 ↔ 集体主义", positive: "个人主义", negative: "集体主义" }
+
+
+

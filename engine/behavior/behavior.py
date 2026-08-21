@@ -48,6 +48,14 @@ def step_behavior(society, cfg: dict, rng: random.Random) -> list:
     ledger = getattr(society, "resource_ledger", None)
     tick = society.clock.tick
 
+    # v0.4.3 §1: 职业分配（每天更新一次）
+    from ..economy.occupation import choose_occupation
+    if tick % cfg.get("ticks_per_day", 100) == 0:
+        regions = getattr(society, "regions", None)
+        for a in agents:
+            region = regions.get(getattr(a, "location", "A")) if regions else None
+            a.occupation = choose_occupation(a, region, cfg).value
+
     counters = {"protest": 0, "conflict": 0, "migrate": 0, "trade": 0,
                 "share": 0, "hoard": 0, "work": 0, "cooperate": 0}
     micro_events: list = []
@@ -140,22 +148,64 @@ def _execute(a: Agent, act, ctx: dict, rng: random.Random, ledger, tick: int, co
 # -- 各 action 的具体实现 ------------------------------------------------
 
 def _do_work(a: Agent, ctx: dict, ledger, tick: int) -> None:
-    """工作（§14）：消耗 energy/food（已结算），产出 money + food（生产，§16）。
+    """工作（v0.4.3 §2）：生产函数 = labor × property × energy × productivity × region × occupation。
 
-    v0.4.2 §19: 使用有效乘数 = base_multiplier - disruption。
+    v0.4.2: 使用有效乘数 = base_multiplier - disruption。
+    v0.4.3: 生产需要投入——没有 property/energy 就无法高效生产。
     """
+    from ..economy.occupation import get_production_multipliers, OccupationType
+
     econ = ctx["cfg"].get("economy", {})
     pm = getattr(ctx["society"], "production_multiplier", 1.0)
     disruption = getattr(ctx["society"], "production_disruption", 0.0)
-    effective_pm = max(0.3, pm - disruption)  # 有效乘数（§19）
-    productivity = 0.5 + a.personality["conscientiousness"] * 0.5
-    a.productivity = productivity
-    wage = econ.get("base_income", 3.0) * productivity * effective_pm
-    food_prod = econ.get("food_production", 0.6) * productivity * effective_pm
-    energy_prod = econ.get("energy_production", 0.06) * productivity * effective_pm
+    effective_pm = max(0.3, pm - disruption)
+
+    # 基础生产力
+    base_productivity = 0.5 + a.personality["conscientiousness"] * 0.5
+    a.productivity = base_productivity
+
+    # v0.4.3 §2: 生产投入因子
+    # property（工具/土地）: 拥有越多生产率越高，但有边际递减 + 保底
+    prop = a.resources.available("property")
+    property_factor = max(0.3, min(1.0, (prop / 20.0) ** 0.5))  # 20 prop → 1.0，保底 0.3
+
+    # energy（生产能量）: 能量不足会限制产出，但保底 0.3
+    energy = a.resources.available("energy")
+    energy_factor = max(0.3, min(1.0, energy / 10.0))  # 10 energy → 1.0，保底 0.3
+
+    # 区域加成
+    region_bonus = 1.0
+    regions = getattr(ctx["society"], "regions", None)
+    if regions:
+        loc = getattr(a, "location", "A")
+        region = regions.get(loc)
+        if region:
+            endow = ctx["cfg"].get("regions", {}).get("endowments", {}).get(loc, {})
+            region_bonus = 0.7 + 0.3 * endow.get("food", 1.0)  # 区域食物禀赋
+
+    # 职业生产乘数
+    occ = getattr(a, "occupation", "farmer")
+    try:
+        occ_type = OccupationType(occ)
+    except ValueError:
+        occ_type = OccupationType.FARMER
+    occ_mult = get_production_multipliers(occ_type)
+
+    # 综合投入因子
+    input_factor = property_factor * energy_factor * region_bonus
+
+    # 产出计算
+    wage = econ.get("base_income", 3.0) * occ_mult["money"] * base_productivity * input_factor * effective_pm
+    food_prod = econ.get("food_production", 0.6) * occ_mult["food"] * base_productivity * input_factor * effective_pm
+    energy_prod = econ.get("energy_production", 0.06) * occ_mult["energy"] * base_productivity * input_factor * effective_pm
+    prop_prod = 0.02 * occ_mult.get("property", 0.0) * base_productivity * input_factor * effective_pm
+
     a.resources.add("money", wage)
     a.resources.add("food", food_prod)
     a.resources.add("energy", energy_prod)
+    if prop_prod > 0:
+        a.resources.add("property", prop_prod)
+
     if ledger is not None:
         ledger.record(source="production", target=a.id, resource="money",
                       amount=round(wage, 4), reason="work", tick=tick)
@@ -350,3 +400,9 @@ def _emit(society, event_type: str, source: str, severity: float, description: s
         intensity=severity,
     )
     return ev
+
+
+
+
+
+

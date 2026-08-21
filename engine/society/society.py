@@ -82,6 +82,10 @@ class Society:
         region_ids = self.config.get("regions", {}).get("list", ["A", "B", "C"])
         self.regions = RegionRegistry(region_ids)
 
+        # v0.4.4: crisis thresholds/cooldowns are config-driven, including
+        # economic_crisis (which previously had no stateful cooldown).
+        self.crisis_manager.configure(self.config)
+
         # Collapse detector configured from the stability section (§26).
         stab = self.config.get("stability", {})
         self.collapse_detector = CollapseDetector(

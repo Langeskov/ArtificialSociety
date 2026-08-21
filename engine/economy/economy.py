@@ -100,7 +100,14 @@ def step_production_recovery(society, cfg: dict, dt_days: float = 0.01) -> None:
     recovery_cfg = econ.get("recovery", {})
     damping = recovery_cfg.get("damping", 0.85)
     max_rate_day = recovery_cfg.get("max_rate_per_day", 0.15)
-    disruption_decay = recovery_cfg.get("disruption_decay", 0.92)
+    # v0.4.4: the old 0.92 was applied per tick, which made a disruption
+    # disappear in a few simulated hours at 100 ticks/day.  Prefer a daily
+    # retention factor and convert it with dt; keep the old key compatible.
+    if "disruption_decay_per_day" in recovery_cfg:
+        daily_retention = float(recovery_cfg["disruption_decay_per_day"])
+        disruption_decay = daily_retention ** max(dt_days, 1e-9)
+    else:
+        disruption_decay = float(recovery_cfg.get("disruption_decay", 0.92))
 
     pm = getattr(society, "production_multiplier", 1.0)
     disruption = getattr(society, "production_disruption", 0.0)

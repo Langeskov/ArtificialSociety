@@ -45,6 +45,7 @@ class Agent:
     employment_status: str = "self_employed"               # employed/unemployed/self_employed/dependent（§15）
     occupation: str = "worker"                             # worker/producer/trader/service/government（§15）
     productivity: float = 0.5                              # 生产效率（§14, §15）
+    resource_pressure_baseline: float = 0.2                  # v0.4.2.1 P0-9: 个人资源压力基线（适应机制）`n    resource_pressure_baseline: float = 0.2                  # v0.4.2.1 P0-9: 个人资源压力基线（适应机制）
     employer: Optional[str] = None                         # 雇主 id（§15）
     relative_deprivation: float = 0.0                      # 相对剥夺（§25, §26）
     current_action: str = ""                               # 本 tick 行为（Inspector §46）
@@ -137,3 +138,7 @@ class Agent:
             "resource_security": round(self.resource_state.get("security", 0.0), 3),
             "resource_pressure": round(self.resource_state.get("pressure", 0.0), 3),
         }
+
+
+
+

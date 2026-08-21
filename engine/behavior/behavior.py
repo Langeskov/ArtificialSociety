@@ -76,7 +76,15 @@ def step_behavior(society, cfg: dict, rng: random.Random) -> list:
     counters["conflict"] += _inter_group_conflict(society, ctx["groups"], ctx["agent_map"], rng, cfg)
 
     # 聚合为宏观事件（§44）
-    if n_alive > 0 and counters["protest"] / n_alive >= protest_event_threshold and not _has_active(society, "protest"):
+    # v0.4.4: behavior-level aggregation must share the CrisisTracker with
+    # step_events.  Previously the two producers could emit independent
+    # protests in adjacent ticks, bypassing persistence/cooldown and adding
+    # repeated production shocks.
+    crisis_manager = getattr(society, "crisis_manager", None)
+    protest_tracker = getattr(crisis_manager, "protest", None)
+    protest_gate_open = protest_tracker is None or protest_tracker.state.value == "NORMAL"
+    if (n_alive > 0 and counters["protest"] / n_alive >= protest_event_threshold
+            and not _has_active(society, "protest") and protest_gate_open):
         micro_events.append(_emit(society, "protest", source="behavior", severity=0.6,
                                   description=f"行为涌现：{counters['protest']} 名 Agent 参与抗议"))
         # v0.4.2 §19: 使用临时干扰而非永久 ratchet

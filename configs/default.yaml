@@ -46,7 +46,7 @@ economy:
   recovery:
     damping: 0.85           # 恢复阻尼：越接近 1.0 恢复越慢（§18 防过冲）
     max_rate_per_day: 0.15  # 每天最大恢复幅度
-    disruption_decay: 0.92  # 临时干扰的衰减率（per tick）
+    disruption_decay_per_day: 0.35  # 临时干扰每天剩余比例（按 dt 换算）
 
 politics:
   movement_strength: 0.01
@@ -57,6 +57,10 @@ politics:
   center_stability: 0.005
   ideology_anchor_strength: 0.02
   max_movement_per_tick: 0.03
+  # 资源政治力只响应超出正常运行基线的稀缺，以及压力上升沿。
+  resource_pressure_baseline: 0.20
+  resource_pressure_persistent_scale: 0.12
+  resource_pressure_rising_edge_gain: 1.5
   extremism_threshold: 0.7
   noise: 0.001
   # v0.3.1: 三轴独立校准参数 (§37)
@@ -180,6 +184,11 @@ events:
       resolve_threshold: 0.08
       trigger_persistence_ticks: 30
       cooldown_days: 2
+    economic:
+      trigger_threshold: 0.68
+      resolve_threshold: 0.45
+      trigger_persistence_ticks: 100
+      cooldown_days: 5
 
 stability:
   collapse_variance_threshold: 0.02

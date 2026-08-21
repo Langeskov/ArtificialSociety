@@ -53,6 +53,7 @@ EVENT_SALIENCE: dict[str, tuple[float, float, float]] = {
 # Y 轴信号分类（§13, §14）
 _SECURITY_EVENTS = {"conflict", "war", "protest"}
 _INSTITUTIONAL_EVENTS = {"government_response", "leadership_change", "scandal", "reform", "recovery", "food_stabilization"}
+_RECOVERY_EVENTS = {"recovery", "food_stabilization"}
 
 
 def _autonomy_preference(p) -> float:
@@ -97,6 +98,8 @@ def interpret_event(event_type: str, agent: Agent, sensitivity: float = 1.0, dea
 
     v0.3.1：X 方向改连续（§4），Z 方向改双向偏好（§9），不再 empathy→Z- 硬映射。
     """
+    if event_type in _RECOVERY_EVENTS:
+        return (0.0, 0.0, 0.0)
     sx, sy, sz = EVENT_SALIENCE.get(event_type, _DEFAULT_SALIENCE)
     p = agent.personality
     trust = p["trust"]
@@ -120,20 +123,25 @@ def interpret_event(event_type: str, agent: Agent, sensitivity: float = 1.0, dea
 
 
 def _resource_pressure(a: Agent) -> float:
+    """v0.4.2.1 P0-8/9: resource pressure as deviation from personal baseline.
+
+    Long-poor agents adapt their baseline; only sudden deterioration creates
+    a political shock. This prevents perpetual X-axis drift from chronic poverty.
+    """
     v = a.resources.values
     food = v["food"]
     money = v["money"]
-    p_food = 1.0 - food / 100.0
-    if p_food < 0.0:
-        p_food = 0.0
-    elif p_food > 1.0:
-        p_food = 1.0
-    p_money = 1.0 - money / 1000.0
-    if p_money < 0.0:
-        p_money = 0.0
-    elif p_money > 1.0:
-        p_money = 1.0
-    return 0.6 * p_food + 0.4 * p_money
+    p_food = max(0.0, min(1.0, 1.0 - food / 100.0))
+    p_money = max(0.0, min(1.0, 1.0 - money / 1000.0))
+    current_pressure = 0.6 * p_food + 0.4 * p_money
+
+    # P0-9: personal baseline adapts slowly to current pressure
+    baseline = getattr(a, "resource_pressure_baseline", 0.2)
+    a.resource_pressure_baseline = baseline * 0.999 + current_pressure * 0.001
+
+    # P0-8: political reaction is shock (deviation from baseline), not state
+    shock = current_pressure - a.resource_pressure_baseline
+    return max(0.0, shock)
 
 
 @dataclass(slots=True)
@@ -284,6 +292,11 @@ def compute_forces(a: Agent, society, params: ForceParams, rng, pressure: float,
     fx_ev = fy_ev = fz_ev = 0.0
     for m in a.recent_events:
         etype = m["type"]
+        # Recovery is an accounting/causal marker, not a fresh political
+        # shock.  Feeding it back into X/Y/Z made every protest resolution
+        # create another political impulse and helped form a limit cycle.
+        if etype in _RECOVERY_EVENTS:
+            continue
         s = m.get("strength", 0.0)
         sx, sy, sz = EVENT_SALIENCE.get(etype, _DEFAULT_SALIENCE)
         fx_ev += sx * econ_bias * conviction * reactivity * s
@@ -402,3 +415,6 @@ def compute_forces(a: Agent, society, params: ForceParams, rng, pressure: float,
               "coupling": fz_coup, "noise": fz_noise},
     }
     return (tx, ty, tz), br
+
+
+

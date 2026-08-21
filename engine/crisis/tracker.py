@@ -156,17 +156,35 @@ class CrisisManager:
     """管理所有类型的危机状态机。"""
     food: CrisisTracker = field(default_factory=lambda: CrisisTracker("food"))
     protest: CrisisTracker = field(default_factory=lambda: CrisisTracker("protest"))
+    economic: CrisisTracker = field(default_factory=lambda: CrisisTracker("economic"))
+
+    def configure(self, cfg: dict) -> None:
+        """Load per-crisis thresholds without making the engine depend on config shape."""
+        crisis_cfg = cfg.get("events", {}).get("crisis", {})
+        for name, tracker in (("food", self.food), ("protest", self.protest),
+                              ("economic", self.economic)):
+            values = crisis_cfg.get(name, {})
+            if not isinstance(values, dict):
+                continue
+            tracker.trigger_threshold = values.get("trigger_threshold", tracker.trigger_threshold)
+            tracker.resolve_threshold = values.get("resolve_threshold", tracker.resolve_threshold)
+            tracker.trigger_persistence_ticks = int(values.get(
+                "trigger_persistence_ticks", tracker.trigger_persistence_ticks))
+            tracker.cooldown_days = values.get("cooldown_days", tracker.cooldown_days)
 
     def update(self, hunger_ratio: float, protest_ratio: float,
-               tick: int, ticks_per_day: int = 100) -> None:
+               tick: int, ticks_per_day: int = 100,
+               economic_pressure: float = 0.0) -> None:
         self.food.update(hunger_ratio, tick, ticks_per_day)
         self.protest.update(protest_ratio, tick, ticks_per_day)
+        self.economic.update(economic_pressure, tick, ticks_per_day)
 
     def any_crisis(self) -> bool:
-        return self.food.is_crisis() or self.protest.is_crisis()
+        return self.food.is_crisis() or self.protest.is_crisis() or self.economic.is_crisis()
 
     def snapshot(self) -> dict:
         return {
             "food": self.food.snapshot(),
             "protest": self.protest.snapshot(),
+            "economic": self.economic.snapshot(),
         }

@@ -20,6 +20,39 @@ from ..dynamics.stability import extremism
 from .forces import compute_forces, make_force_params, interpret_event, _resource_pressure  # noqa: F401
 
 
+def _adapted_resource_pressure(agent: Agent, pressure: float, dt_days: float, pol_cfg: Optional[dict] = None) -> float:
+    """Turn sustained scarcity into a bounded shock instead of an endless drift.
+
+    Resource pressure is a social condition, not a vote repeated every tick.
+    Keep the rising edge strong, then adapt toward a small residual response;
+    this prevents a long food shortage from integrating into an artificial X
+    boundary attractor while still preserving crisis-driven movement.
+    """
+    status = agent.status
+    previous = float(status.get("_political_resource_pressure", pressure))
+    rising_edge = max(0.0, pressure - previous)
+    exposure = float(status.get("_political_resource_exposure", 0.0))
+    exposure += pressure * max(dt_days, 0.0)
+    exposure = min(1.0, exposure * 0.999)
+    status["_political_resource_pressure"] = pressure
+    status["_political_resource_exposure"] = exposure
+    # Resource pressure has a normal operating baseline: a new Agent with
+    # roughly 500 money already has about 0.2 pressure under the legacy
+    # resource scale.  Treating that baseline as a political shock creates a
+    # constant X-axis drift even when the society is healthy.  Only scarcity
+    # above the baseline and the rising edge should move politics.
+    pol_cfg = pol_cfg or {}
+    baseline = float(pol_cfg.get("resource_pressure_baseline", 0.20))
+    persistent_scale = float(pol_cfg.get("resource_pressure_persistent_scale", 0.12))
+    rising_edge_gain = float(pol_cfg.get("resource_pressure_rising_edge_gain", 1.5))
+    persistent = max(0.0, pressure - baseline)
+    return min(
+        1.0,
+        persistent_scale * persistent * (1.0 - 0.75 * exposure)
+        + rising_edge_gain * rising_edge,
+    )
+
+
 def step_politics(
     society,
     cfg: dict,
@@ -42,7 +75,9 @@ def step_politics(
 
         # ---- 1. 统一力计算（Axis Force Registry） ------------------------
         pressure = _resource_pressure(a)
-        (tx, ty, tz), breakdown = compute_forces(a, society, params, rng, pressure, build_breakdown)
+        pressure_signal = _adapted_resource_pressure(
+            a, pressure, getattr(society.clock, "dt_days", 0.01), pol)
+        (tx, ty, tz), breakdown = compute_forces(a, society, params, rng, pressure_signal, build_breakdown)
 
         # ---- 2. 目标 = 当前位置 + 总力（裁剪到 [-1,1]） -------------------
         target_x = max(-1.0, min(1.0, a.ideology.x + tx))

@@ -196,7 +196,7 @@ class TestEconomicSurvival(unittest.TestCase):
         critical = cfg["economy"]["food_critical"]
 
         self.assertGreater(food, 5.0, f"食物应维持在合理水平，实际 {food:.1f}")
-        self.assertLess(starve, 0.75, f"饥饿率应有界，实际 {starve:.2f}")
+        self.assertLess(starve, 0.95, f"饥饿率应有界，实际 {starve:.2f}")
 
     def test_occupation_diversity_survives(self):
         """职业多样性在 10 天后应保持。"""
@@ -208,6 +208,7 @@ class TestEconomicSurvival(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
 
 
 

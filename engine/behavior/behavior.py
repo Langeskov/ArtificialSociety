@@ -81,6 +81,9 @@ def step_behavior(society, cfg: dict, rng: random.Random) -> list:
         # Advance current action
         if act_state.is_busy():
             completed = act_state.advance(dt_hours)
+            # v0.4.3.1: produce gradually during work
+            if act_state.current_action == "work":
+                _do_work_tick(a, ctx, ledger, tick, dt_hours)
             if not completed:
                 # Still busy, skip to next agent
                 continue

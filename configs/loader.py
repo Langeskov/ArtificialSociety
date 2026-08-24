@@ -60,7 +60,7 @@ def default_society_config() -> dict:
             "food_critical": 20.0,         # below this → survival/recovery mode
             # v0.4.3 §7: hourly production rates
             "production": {
-                "food": {"per_hour": 2.00},
+                "food": {"per_hour": 6.00},
                 "energy": {"per_hour": 0.12},
                 "money": {"wage_per_hour": 1.50},
             },
@@ -215,6 +215,10 @@ def _deep_merge(base: dict, override: dict) -> dict:
         else:
             base[k] = v
     return base
+
+
+
+
 
 
 

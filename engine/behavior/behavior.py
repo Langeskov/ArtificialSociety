@@ -31,7 +31,9 @@ def _build_ctx(society, cfg: dict) -> dict:
 
 
 def step_behavior(society, cfg: dict, rng: random.Random) -> list:
-    """推进行为：候选→选择→成本结算→执行→聚合为事件（§9–§14, §44）。"""
+    """v0.4.3.1: Action scheduler — actions have duration, not instant."""
+    from .scheduler import AgentActivity, get_dt_hours
+
     bcfg = cfg.get("behavior", {})
     protest_event_threshold = bcfg.get("protest_threshold", 0.10)
     conflict_event_threshold = bcfg.get("conflict_threshold", 0.05)
@@ -42,15 +44,28 @@ def step_behavior(society, cfg: dict, rng: random.Random) -> list:
     if n_alive == 0:
         return []
 
-    actions = default_actions(cfg)
-    ctx = _build_ctx(society, cfg)
-    ctx["food_price"] = _food_price(ctx)  # §20 价格每 tick 计算一次，而非每次交易重算全局均值
-    ledger = getattr(society, "resource_ledger", None)
+    ticks_per_day = cfg.get("ticks_per_day", 100)
+    dt_hours = get_dt_hours(ticks_per_day)
     tick = society.clock.tick
 
-    # v0.4.3 §1: 职业分配（每天更新一次）
+    # Initialize activity for all agents
+    for a in agents:
+        if a.activity is None:
+            a.activity = AgentActivity()
+
+    # Daily reset
+    if tick % ticks_per_day == 0:
+        for a in agents:
+            a.activity.reset_daily(tick)
+
+    actions = default_actions(cfg)
+    ctx = _build_ctx(society, cfg)
+    ctx["food_price"] = _food_price(ctx)
+    ledger = getattr(society, "resource_ledger", None)
+
+    # Occupation assignment (daily)
     from ..economy.occupation import choose_occupation
-    if tick % cfg.get("ticks_per_day", 100) == 0:
+    if tick % ticks_per_day == 0:
         regions = getattr(society, "regions", None)
         for a in agents:
             region = regions.get(getattr(a, "location", "A")) if regions else None
@@ -61,45 +76,55 @@ def step_behavior(society, cfg: dict, rng: random.Random) -> list:
     micro_events: list = []
 
     for a in agents:
+        act_state = a.activity
+
+        # Advance current action
+        if act_state.is_busy():
+            completed = act_state.advance(dt_hours)
+            if not completed:
+                # Still busy, skip to next agent
+                continue
+            # Action completed — apply effects
+            _apply_completion(a, act_state, ctx, rng, ledger, tick, counters)
+
+        # Agent is idle — choose new action if budget allows
+        if act_state.available_hours() < 0.5:
+            continue
+
         sel = select_action(a, actions, ctx, rng)
         if sel is None:
             a.current_action = ""
             continue
         act, u, f = sel
-        # 记录选择（Inspector §46：Agent 为什么做这个行为）——直接复用 select_action 的评估结果
         a.current_action = act.name
         a.action_utility = round(u, 4)
         a.action_feasibility = round(f, 4)
-        _execute(a, act, ctx, rng, ledger, tick, counters)
 
-    # 跨群体冲突（§50, §78）
+        # Start action with duration
+        act_state.start_action(act.name, tick)
+        # Pay costs immediately
+        _execute_cost(a, act, ctx, rng, ledger, tick)
+
+    # Inter-group conflict
     counters["conflict"] += _inter_group_conflict(society, ctx["groups"], ctx["agent_map"], rng, cfg)
 
-    # 聚合为宏观事件（§44）
-    # v0.4.4: behavior-level aggregation must share the CrisisTracker with
-    # step_events.  Previously the two producers could emit independent
-    # protests in adjacent ticks, bypassing persistence/cooldown and adding
-    # repeated production shocks.
+    # Aggregate to macro events
     crisis_manager = getattr(society, "crisis_manager", None)
     protest_tracker = getattr(crisis_manager, "protest", None)
     protest_gate_open = protest_tracker is None or protest_tracker.state.value == "NORMAL"
     if (n_alive > 0 and counters["protest"] / n_alive >= protest_event_threshold
             and not _has_active(society, "protest") and protest_gate_open):
         micro_events.append(_emit(society, "protest", source="behavior", severity=0.6,
-                                  description=f"行为涌现：{counters['protest']} 名 Agent 参与抗议"))
-        # v0.4.2 §19: 使用临时干扰而非永久 ratchet
-        # 原: society.production_multiplier = max(0.5, pm - 0.1)
-        # 新: 累加临时干扰，由 step_production_recovery 自动衰减
+                                  description=f"行为涌现：{counters[chr(39)+chr(39)]} 名 Agent 参与抗议"))
         society.production_disruption = min(0.4, getattr(society, "production_disruption", 0.0) + 0.08)
     if n_alive > 0 and counters["conflict"] / n_alive >= conflict_event_threshold and not _has_active(society, "conflict"):
         micro_events.append(_emit(society, "conflict", source="behavior", severity=0.5,
-                                  description=f"行为涌现：群体间冲突 {counters['conflict']} 起"))
+                                  description=f"行为涌现：群体间冲突 {counters[chr(39)+chr(39)]} 起"))
     if n_alive > 0 and counters["migrate"] / n_alive >= migration_event_threshold and not _has_active(society, "migration"):
         micro_events.append(_emit(society, "migration", source="behavior", severity=0.4,
-                                  description=f"行为涌现：{counters['migrate']} 名 Agent 迁移"))
+                                  description=f"行为涌现：{counters[chr(39)+chr(39)]} 名 Agent 迁移"))
 
     return micro_events
-
 
 def _execute(a: Agent, act, ctx: dict, rng: random.Random, ledger, tick: int, counters: dict) -> None:
     """执行单个行为：先 reserve 成本，成功后 commit；具体效果按 action 分发（§59, §60）。"""
@@ -168,7 +193,7 @@ def _apply_completion(a: Agent, act_state, ctx: dict, rng: random.Random,
     a.current_action = action_name
 
     if action_name == "work":
-        _do_work_hourly(a, ctx, ledger, tick, hours)
+        _do_work(a, ctx, ledger, tick, hours)
         counters["work"] += 1
     elif action_name == "trade":
         if _do_trade(a, ctx, rng, ledger, tick):
@@ -203,8 +228,7 @@ def _apply_completion(a: Agent, act_state, ctx: dict, rng: random.Random,
     a.current_action = old_action
 
 
-def _execute_cost(a: Agent, act, ctx: dict, rng: random.Random,
-                  ledger, tick: int, counters: dict) -> None:
+def _execute_cost(a: Agent, act, ctx: dict, rng: random.Random, ledger, tick: int) -> None:
     """v0.4.3: 动作启动时预扣成本（能量、金钱等）。"""
     for res, amt in act.cost.items():
         if amt <= 0:
@@ -215,7 +239,56 @@ def _execute_cost(a: Agent, act, ctx: dict, rng: random.Random,
         commit(a, res, amt, ledger, f"action:{act.name}", tick)
 
 
-def _do_work_hourly(a: Agent, ctx: dict, ledger, tick: int, hours: float) -> None:
+def _do_work_tick(a: Agent, ctx: dict, ledger, tick: int, dt_hours: float) -> None:
+    """v0.4.3.1: Produce food/energy/money gradually during work action."""
+    from ..economy.occupation import get_production_multipliers, OccupationType
+
+    econ = ctx["cfg"].get("economy", {})
+    pm = getattr(ctx["society"], "production_multiplier", 1.0)
+    disruption = getattr(ctx["society"], "production_disruption", 0.0)
+    effective_pm = max(0.3, pm - disruption)
+
+    base_productivity = 0.5 + a.personality["conscientiousness"] * 0.5
+    a.productivity = base_productivity
+
+    prop = a.resources.available("property")
+    property_factor = max(0.3, min(1.0, (prop / 20.0) ** 0.5))
+    energy = a.resources.available("energy")
+    energy_factor = max(0.3, min(1.0, energy / 10.0))
+
+    region_bonus = 1.0
+    regions = getattr(ctx["society"], "regions", None)
+    if regions:
+        loc = getattr(a, "location", "A")
+        region = regions.get(loc)
+        if region:
+            endow = ctx["cfg"].get("regions", {}).get("endowments", {}).get(loc, {})
+            region_bonus = 0.7 + 0.3 * endow.get("food", 1.0)
+
+    occ = getattr(a, "occupation", "farmer")
+    try:
+        occ_type = OccupationType(occ)
+    except ValueError:
+        occ_type = OccupationType.FARMER
+    occ_mult = get_production_multipliers(occ_type)
+
+    input_factor = property_factor * energy_factor * region_bonus
+
+    production_cfg = econ.get("production", {})
+    food_rate = production_cfg.get("food", {}).get("per_hour", 6.0)
+    energy_rate = production_cfg.get("energy", {}).get("per_hour", 0.12)
+    wage_rate = production_cfg.get("money", {}).get("wage_per_hour", 1.50)
+
+    food_prod = food_rate * occ_mult["food"] * dt_hours * base_productivity * input_factor * effective_pm
+    energy_prod = energy_rate * occ_mult["energy"] * dt_hours * base_productivity * input_factor * effective_pm
+    wage = wage_rate * occ_mult["money"] * dt_hours * base_productivity * input_factor * effective_pm
+
+    a.resources.add("food", food_prod)
+    a.resources.add("energy", energy_prod)
+    a.resources.add("money", wage)
+
+
+def _do_work(a: Agent, ctx: dict, ledger, tick: int, hours: float) -> None:
     """v0.4.3 §7: 按小时生产，不是 per-action batch。
 
     production = rate_per_hour × effective_hours × productivity × inputs
@@ -278,72 +351,6 @@ def _do_work_hourly(a: Agent, ctx: dict, ledger, tick: int, hours: float) -> Non
         ledger.record(source="production", target=a.id, resource="money",
                       amount=round(wage, 4), reason="work", tick=tick)
 
-
-def _do_work(a: Agent, ctx: dict, ledger, tick: int) -> None:
-    """v0.4.3 §7: hourly production (rate × dt_hours), not per-action batch.
-
-    This ensures time resolution invariance: ticks_per_day=100 and 200
-    produce the same total resources per simulated day.
-    """
-    from ..economy.occupation import get_production_multipliers, OccupationType
-
-    econ = ctx["cfg"].get("economy", {})
-    pm = getattr(ctx["society"], "production_multiplier", 1.0)
-    disruption = getattr(ctx["society"], "production_disruption", 0.0)
-    effective_pm = max(0.3, pm - disruption)
-
-    base_productivity = 0.5 + a.personality["conscientiousness"] * 0.5
-    a.productivity = base_productivity
-
-    # v0.4.3 §2: production inputs
-    prop = a.resources.available("property")
-    property_factor = max(0.3, min(1.0, (prop / 20.0) ** 0.5))
-    energy = a.resources.available("energy")
-    energy_factor = max(0.3, min(1.0, energy / 10.0))
-
-    # Regional bonus
-    region_bonus = 1.0
-    regions = getattr(ctx["society"], "regions", None)
-    if regions:
-        loc = getattr(a, "location", "A")
-        region = regions.get(loc)
-        if region:
-            endow = ctx["cfg"].get("regions", {}).get("endowments", {}).get(loc, {})
-            region_bonus = 0.7 + 0.3 * endow.get("food", 1.0)
-
-    # Occupation multipliers
-    occ = getattr(a, "occupation", "farmer")
-    try:
-        occ_type = OccupationType(occ)
-    except ValueError:
-        occ_type = OccupationType.FARMER
-    occ_mult = get_production_multipliers(occ_type)
-
-    input_factor = property_factor * energy_factor * region_bonus
-
-    # v0.4.3 §7: hourly rates × dt_hours (time resolution invariant)
-    tpd = ctx["cfg"].get("ticks_per_day", 100)
-    dt_hours = 24.0 / tpd  # hours per tick
-
-    production_cfg = econ.get("production", {})
-    food_rate = production_cfg.get("food", {}).get("per_hour", 0.12)
-    energy_rate = production_cfg.get("energy", {}).get("per_hour", 0.02)
-    wage_rate = production_cfg.get("money", {}).get("wage_per_hour", 0.60)
-
-    food_prod = food_rate * occ_mult["food"] * dt_hours * base_productivity * input_factor * effective_pm
-    energy_prod = energy_rate * occ_mult["energy"] * dt_hours * base_productivity * input_factor * effective_pm
-    wage = wage_rate * occ_mult["money"] * dt_hours * base_productivity * input_factor * effective_pm
-    prop_prod = 0.005 * occ_mult.get("property", 0.0) * dt_hours * base_productivity * input_factor * effective_pm
-
-    a.resources.add("money", wage)
-    a.resources.add("food", food_prod)
-    a.resources.add("energy", energy_prod)
-    if prop_prod > 0:
-        a.resources.add("property", prop_prod)
-
-    if ledger is not None:
-        ledger.record(source="production", target=a.id, resource="money",
-                      amount=round(wage, 4), reason="work", tick=tick)
 
 def _do_trade(a: Agent, ctx: dict, rng: random.Random, ledger, tick: int) -> bool:
     """交易（§18–§20）：找 counterparty，按稀缺性定价，守恒转移。"""
@@ -534,6 +541,7 @@ def _emit(society, event_type: str, source: str, severity: float, description: s
         intensity=severity,
     )
     return ev
+
 
 
 

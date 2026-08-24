@@ -46,7 +46,7 @@ class Agent:
     occupation: str = "worker"                             # worker/producer/trader/service/government（§15）
     productivity: float = 0.5                              # 生产效率（§14, §15）
     resource_pressure_baseline: float = 0.2                  # v0.4.2.1: personal baseline adaptation
-    action_ticks_remaining: int = 0                          # v0.4.3: ticks until current action completes
+    activity: object = None                                  # v0.4.3.1: AgentActivity (scheduler)
     employer: Optional[str] = None                         # 雇主 id（§15）
     relative_deprivation: float = 0.0                      # 相对剥夺（§25, §26）
     current_action: str = ""                               # 本 tick 行为（Inspector §46）

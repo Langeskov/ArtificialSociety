@@ -58,6 +58,12 @@ def default_society_config() -> dict:
             "food_production": 1.5,        # work 行为的食物产出系数（v0.4.1 移入行为）
             "energy_production": 0.10,     # work 行为的能量产出系数
             "food_critical": 20.0,         # below this → survival/recovery mode
+            # v0.4.3 §7: hourly production rates
+            "production": {
+                "food": {"per_hour": 2.00},
+                "energy": {"per_hour": 0.12},
+                "money": {"wage_per_hour": 1.50},
+            },
             "recovery_rate": 0.05,         # production recovery per tick after shocks
             "trade_base_price": 1.0,       # v0.4.1 §20：食物基础价格
         },
@@ -209,6 +215,9 @@ def _deep_merge(base: dict, override: dict) -> dict:
         else:
             base[k] = v
     return base
+
+
+
 
 
 

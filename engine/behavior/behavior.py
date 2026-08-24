@@ -155,11 +155,70 @@ def _execute(a: Agent, act, ctx: dict, rng: random.Random, ledger, tick: int, co
 
 # -- 各 action 的具体实现 ------------------------------------------------
 
-def _do_work(a: Agent, ctx: dict, ledger, tick: int) -> None:
-    """工作（v0.4.3 §2）：生产函数 = labor × property × energy × productivity × region × occupation。
+def _apply_completion(a: Agent, act_state, ctx: dict, rng: random.Random,
+                      ledger, tick: int, counters: dict) -> None:
+    """v0.4.3: 动作完成时应用结果。Production = rate × hours."""
+    action_name = act_state.current_action
+    if action_name is None:
+        return
+    hours = act_state.hours_committed
 
-    v0.4.2: 使用有效乘数 = base_multiplier - disruption。
-    v0.4.3: 生产需要投入——没有 property/energy 就无法高效生产。
+    # 临时设置 current_action 以复用现有逻辑
+    old_action = a.current_action
+    a.current_action = action_name
+
+    if action_name == "work":
+        _do_work_hourly(a, ctx, ledger, tick, hours)
+        counters["work"] += 1
+    elif action_name == "trade":
+        if _do_trade(a, ctx, rng, ledger, tick):
+            counters["trade"] += 1
+    elif action_name == "save":
+        _do_save(a, ctx, ledger, tick)
+        counters["hoard"] += 1
+    elif action_name == "consume":
+        _do_consume(a, ctx, ledger, tick)
+    elif action_name == "share":
+        if _do_share(a, ctx, rng, ledger, tick):
+            counters["share"] += 1
+    elif action_name == "cooperate":
+        a.status["anger"] = max(0.0, a.status.get("anger", 0.0) - 0.02)
+        a.status["trust_in_government"] = min(1.0, a.status.get("trust_in_government", 0.5) + 0.005)
+        counters["cooperate"] += 1
+    elif action_name == "protest":
+        a.status["anger"] = max(0.0, a.status.get("anger", 0.0) - 0.1)
+        counters["protest"] += 1
+    elif action_name == "migrate":
+        if _do_migrate(a, ctx, rng):
+            counters["migrate"] += 1
+    elif action_name == "rest":
+        a.resources.add("energy", 5.0 * (hours / 8.0))  # 按比例恢复
+    elif action_name == "join_group":
+        _do_join_group(a, ctx, rng)
+    elif action_name == "leave_group":
+        _do_leave_group(a, ctx, tick)
+    elif action_name == "communicate":
+        pass
+
+    a.current_action = old_action
+
+
+def _execute_cost(a: Agent, act, ctx: dict, rng: random.Random,
+                  ledger, tick: int, counters: dict) -> None:
+    """v0.4.3: 动作启动时预扣成本（能量、金钱等）。"""
+    for res, amt in act.cost.items():
+        if amt <= 0:
+            continue
+        if not reserve(a, res, amt):
+            # 成本不足，动作无法启动
+            return
+        commit(a, res, amt, ledger, f"action:{act.name}", tick)
+
+
+def _do_work_hourly(a: Agent, ctx: dict, ledger, tick: int, hours: float) -> None:
+    """v0.4.3 §7: 按小时生产，不是 per-action batch。
+
+    production = rate_per_hour × effective_hours × productivity × inputs
     """
     from ..economy.occupation import get_production_multipliers, OccupationType
 
@@ -168,18 +227,14 @@ def _do_work(a: Agent, ctx: dict, ledger, tick: int) -> None:
     disruption = getattr(ctx["society"], "production_disruption", 0.0)
     effective_pm = max(0.3, pm - disruption)
 
-    # 基础生产力
     base_productivity = 0.5 + a.personality["conscientiousness"] * 0.5
     a.productivity = base_productivity
 
-    # v0.4.3 §2: 生产投入因子
-    # property（工具/土地）: 拥有越多生产率越高，但有边际递减 + 保底
+    # 生产投入因子
     prop = a.resources.available("property")
-    property_factor = max(0.3, min(1.0, (prop / 20.0) ** 0.5))  # 20 prop → 1.0，保底 0.3
-
-    # energy（生产能量）: 能量不足会限制产出，但保底 0.3
+    property_factor = max(0.3, min(1.0, (prop / 20.0) ** 0.5))
     energy = a.resources.available("energy")
-    energy_factor = max(0.3, min(1.0, energy / 10.0))  # 10 energy → 1.0，保底 0.3
+    energy_factor = max(0.3, min(1.0, energy / 10.0))
 
     # 区域加成
     region_bonus = 1.0
@@ -189,7 +244,7 @@ def _do_work(a: Agent, ctx: dict, ledger, tick: int) -> None:
         region = regions.get(loc)
         if region:
             endow = ctx["cfg"].get("regions", {}).get("endowments", {}).get(loc, {})
-            region_bonus = 0.7 + 0.3 * endow.get("food", 1.0)  # 区域食物禀赋
+            region_bonus = 0.7 + 0.3 * endow.get("food", 1.0)
 
     # 职业生产乘数
     occ = getattr(a, "occupation", "farmer")
@@ -199,14 +254,19 @@ def _do_work(a: Agent, ctx: dict, ledger, tick: int) -> None:
         occ_type = OccupationType.FARMER
     occ_mult = get_production_multipliers(occ_type)
 
-    # 综合投入因子
     input_factor = property_factor * energy_factor * region_bonus
 
-    # 产出计算
-    wage = econ.get("base_income", 3.0) * occ_mult["money"] * base_productivity * input_factor * effective_pm
-    food_prod = econ.get("food_production", 0.6) * occ_mult["food"] * base_productivity * input_factor * effective_pm
-    energy_prod = econ.get("energy_production", 0.06) * occ_mult["energy"] * base_productivity * input_factor * effective_pm
-    prop_prod = 0.02 * occ_mult.get("property", 0.0) * base_productivity * input_factor * effective_pm
+    # v0.4.3 §7: 按小时计算产出（不是 per-action batch）
+    # rate_per_hour × hours × productivity × input × pm
+    production_cfg = econ.get("production", {})
+    food_rate = production_cfg.get("food", {}).get("per_hour", 0.12)
+    energy_rate = production_cfg.get("energy", {}).get("per_hour", 0.02)
+    wage_rate = production_cfg.get("money", {}).get("wage_per_hour", 0.60)
+
+    food_prod = food_rate * occ_mult["food"] * hours * base_productivity * input_factor * effective_pm
+    energy_prod = energy_rate * occ_mult["energy"] * hours * base_productivity * input_factor * effective_pm
+    wage = wage_rate * occ_mult["money"] * hours * base_productivity * input_factor * effective_pm
+    prop_prod = 0.005 * occ_mult.get("property", 0.0) * hours * base_productivity * input_factor * effective_pm
 
     a.resources.add("money", wage)
     a.resources.add("food", food_prod)
@@ -218,6 +278,72 @@ def _do_work(a: Agent, ctx: dict, ledger, tick: int) -> None:
         ledger.record(source="production", target=a.id, resource="money",
                       amount=round(wage, 4), reason="work", tick=tick)
 
+
+def _do_work(a: Agent, ctx: dict, ledger, tick: int) -> None:
+    """v0.4.3 §7: hourly production (rate × dt_hours), not per-action batch.
+
+    This ensures time resolution invariance: ticks_per_day=100 and 200
+    produce the same total resources per simulated day.
+    """
+    from ..economy.occupation import get_production_multipliers, OccupationType
+
+    econ = ctx["cfg"].get("economy", {})
+    pm = getattr(ctx["society"], "production_multiplier", 1.0)
+    disruption = getattr(ctx["society"], "production_disruption", 0.0)
+    effective_pm = max(0.3, pm - disruption)
+
+    base_productivity = 0.5 + a.personality["conscientiousness"] * 0.5
+    a.productivity = base_productivity
+
+    # v0.4.3 §2: production inputs
+    prop = a.resources.available("property")
+    property_factor = max(0.3, min(1.0, (prop / 20.0) ** 0.5))
+    energy = a.resources.available("energy")
+    energy_factor = max(0.3, min(1.0, energy / 10.0))
+
+    # Regional bonus
+    region_bonus = 1.0
+    regions = getattr(ctx["society"], "regions", None)
+    if regions:
+        loc = getattr(a, "location", "A")
+        region = regions.get(loc)
+        if region:
+            endow = ctx["cfg"].get("regions", {}).get("endowments", {}).get(loc, {})
+            region_bonus = 0.7 + 0.3 * endow.get("food", 1.0)
+
+    # Occupation multipliers
+    occ = getattr(a, "occupation", "farmer")
+    try:
+        occ_type = OccupationType(occ)
+    except ValueError:
+        occ_type = OccupationType.FARMER
+    occ_mult = get_production_multipliers(occ_type)
+
+    input_factor = property_factor * energy_factor * region_bonus
+
+    # v0.4.3 §7: hourly rates × dt_hours (time resolution invariant)
+    tpd = ctx["cfg"].get("ticks_per_day", 100)
+    dt_hours = 24.0 / tpd  # hours per tick
+
+    production_cfg = econ.get("production", {})
+    food_rate = production_cfg.get("food", {}).get("per_hour", 0.12)
+    energy_rate = production_cfg.get("energy", {}).get("per_hour", 0.02)
+    wage_rate = production_cfg.get("money", {}).get("wage_per_hour", 0.60)
+
+    food_prod = food_rate * occ_mult["food"] * dt_hours * base_productivity * input_factor * effective_pm
+    energy_prod = energy_rate * occ_mult["energy"] * dt_hours * base_productivity * input_factor * effective_pm
+    wage = wage_rate * occ_mult["money"] * dt_hours * base_productivity * input_factor * effective_pm
+    prop_prod = 0.005 * occ_mult.get("property", 0.0) * dt_hours * base_productivity * input_factor * effective_pm
+
+    a.resources.add("money", wage)
+    a.resources.add("food", food_prod)
+    a.resources.add("energy", energy_prod)
+    if prop_prod > 0:
+        a.resources.add("property", prop_prod)
+
+    if ledger is not None:
+        ledger.record(source="production", target=a.id, resource="money",
+                      amount=round(wage, 4), reason="work", tick=tick)
 
 def _do_trade(a: Agent, ctx: dict, rng: random.Random, ledger, tick: int) -> bool:
     """交易（§18–§20）：找 counterparty，按稀缺性定价，守恒转移。"""
@@ -408,6 +534,8 @@ def _emit(society, event_type: str, source: str, severity: float, description: s
         intensity=severity,
     )
     return ev
+
+
 
 
 

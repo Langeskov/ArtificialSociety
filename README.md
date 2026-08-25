@@ -4,7 +4,7 @@
 
 > 规则优先于智能，社会优先于个体，观察优先于预设结论。
 
-本项目实现了《Multi-Agent Artificial Society & 3D Political Spectrum v0.1》**第一阶段 MVP 的完整闭环**，并已依次升级至 **v0.2（Stability & Dynamics Patch）** 和 **v0.3（Political Dynamics & Observability）**：
+本项目实现了《Multi-Agent Artificial Society & 3D Political Spectrum v0.1》**第一阶段 MVP 的完整闭环**，并已依次升级至 **v0.2（Stability & Dynamics Patch）**、**v0.3（Political Dynamics & Observability）**、**v0.4（Emergent Society）**、**v0.4.1（Resource-Constrained Society）**、**v0.4.2（Temporal & Crisis Calibration）** 和 **v0.4.3（Local Economy & Economic Structure）**：
 
 ```
 参数 → Agent → 行为 → 事件 → 社会变化 → 三维空间 → 可视化 → 可重复实验
@@ -36,7 +36,7 @@ uv pip install --python .venv/Scripts/python.exe `
 ## 运行测试
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest          # 89 个测试（冒烟 + 稳定性 + 政治动力学 + 社会涌现 + 资源层）
+.\.venv\Scripts\python.exe -m pytest          # 87 个测试（冒烟 + 稳定性 + 政治动力学 + 社会涌现 + 资源层）
 # 或分套件运行：
 .\.venv\Scripts\python.exe -m pytest tests/test_stability.py -v
 .\.venv\Scripts\python.exe -m pytest tests/test_political_dynamics.py -v
@@ -177,6 +177,66 @@ membership 爆炸等及其修复）。
 
 ```powershell
 .\\.venv\\Scripts\\python.exe -m pytest tests\\test_temporal_v042.py -v   # 19 个时间/危机测试
+```
+
+
+## v0.4.2.1 反馈解耦热修复（Feedback Decoupling Hotfix）
+
+解决 v0.4.2 遗留的**三个闭环耦合**问题：
+
+| 问题 | 修复 |
+|---|---|
+| **X 轴资源压力 = 长期状态力** | `_resource_pressure` 改为偏离个人基线的 shock（`current - baseline`），长期贫困 Agent 会适应，不会永久产生政治漂移 |
+| **经济危机 → food_stabilization** | 新增 `economic_recovery` 事件类型，经济危机不再错误地生成粮食企稳事件 |
+| **个人资源基线** | `Agent.resource_pressure_baseline` 缓慢适应当前压力（0.1%/tick），突然贫困产生强冲击，长期贫困被适应 |
+
+核心设计：
+- **Resource Pressure as Shock**（P0-8）：只有偏离基线的恶化才产生政治冲击
+- **Personal Baseline Adaptation**（P0-9）：`baseline = baseline × 0.999 + current × 0.001`
+- **Recovery Event Semantics**（P0-2）：food→food_stabilization, economic→economic_recovery
+
+```powershell
+.\\.venv\\Scripts\\python.exe -m pytest tests\\test_resource_v041.py tests\\test_stability.py tests\\test_political_dynamics.py -v   # 42 个核心测试
+```
+
+## v0.4.3 本地经济与经济结构（Local Economy & Economic Structure）
+
+建立**以模拟时间为基础的资源生产与经济流量系统**，解决「Action Flow ≠ Simulation Time」的结构性问题。
+
+| 子系统 | 核心机制 |
+|---|---|
+| **Occupation System**（`engine/economy/occupation.py`） | 6 种职业：farmer/miner/manufacturer/trader/service/government，由 personality + region + resource 共同决定 |
+| **Hourly Production**（`engine/behavior/behavior.py`） | `rate_per_hour × dt_hours × productivity × inputs × occupation_mult`，时间分辨率不变 |
+| **Production Inputs**（§2） | 生产需要 labor × property × energy × region，形成资源互依赖 |
+| **Regional Specialization**（`engine/economy/region.py`） | Region A: Food+++, Region B: Energy++, Region C: Services++ |
+| **Dynamic Pricing**（§4） | `price = base × scarcity`，供需驱动 |
+
+关键设计：
+- **时间分辨率不变性**：100 ticks/day 和 200 ticks/day 生产相同总量
+- **生产需要投入**：没有 energy/property 就无法高效生产
+- **职业多样性**：6 种职业自然涌现，不同人格适合不同职业
+
+```powershell
+.\\.venv\\Scripts\\python.exe -m pytest tests\\test_economic_v043.py -v   # 12 个经济结构测试
+```
+
+## v0.4.3.1 动作调度器与渐进生产（Action Scheduler & Gradual Production）
+
+解决「每 tick 都能选择并完成一个 Action」的结构性问题，建立**真正的时间预算系统**。
+
+| 子系统 | 核心机制 |
+|---|---|
+| **Action Scheduler**（`engine/behavior/scheduler.py`） | Actions 有 duration（work=4h, rest=4h, trade=2h），Agent 承诺执行期间不能切换 |
+| **Gradual Production**（`_do_work_tick`） | 生产在工作期间**逐 tick 发生**，不是完成后一次性结算 |
+| **24h Daily Budget** | Agent 每天 24 小时预算，不能超支 |
+
+关键设计：
+- **Action ≠ Instant**：work 需要 4 小时，期间不能做其他事
+- **Production = Rate × Time**：每 tick 生产 `rate × dt_hours`，不是 per-action batch
+- **时间预算**：Agent 不能一天工作 73 小时
+
+```powershell
+.\\.venv\\Scripts\\python.exe -m pytest tests/ -v --tb=line   # 87 个测试全通过
 ```
 
 ## 系统架构（六层）

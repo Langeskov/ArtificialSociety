@@ -4,7 +4,7 @@
 
 > 规则优先于智能，社会优先于个体，观察优先于预设结论。
 
-本项目实现了《Multi-Agent Artificial Society & 3D Political Spectrum v0.1》**第一阶段 MVP 的完整闭环**，并已依次升级至 **v0.2（Stability & Dynamics Patch）**、**v0.3（Political Dynamics & Observability）**、**v0.4（Emergent Society）**、**v0.4.1（Resource-Constrained Society）**、**v0.4.2（Temporal & Crisis Calibration）** 和 **v0.4.3（Local Economy & Economic Structure）**：
+本项目实现了《Multi-Agent Artificial Society & 3D Political Spectrum v0.1》**第一阶段 MVP 的完整闭环**，并已依次升级至 **v0.2（Stability & Dynamics Patch）**、**v0.3（Political Dynamics & Observability）**、**v0.4（Emergent Society）**、**v0.4.1（Resource-Constrained Society）**、**v0.4.2（Temporal & Crisis Calibration）** 和 **v0.4.3（Local Economy & Economic Structure）** 和 **v0.4.4（Production Units & Labor Structure）**：
 
 ```
 参数 → Agent → 行为 → 事件 → 社会变化 → 三维空间 → 可视化 → 可重复实验
@@ -36,7 +36,7 @@ uv pip install --python .venv/Scripts/python.exe `
 ## 运行测试
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest          # 87 个测试（冒烟 + 稳定性 + 政治动力学 + 社会涌现 + 资源层）
+.\.venv\Scripts\python.exe -m pytest          # 119 个测试（冒烟 + 稳定性 + 政治动力学 + 社会涌现 + 资源层）
 # 或分套件运行：
 .\.venv\Scripts\python.exe -m pytest tests/test_stability.py -v
 .\.venv\Scripts\python.exe -m pytest tests/test_political_dynamics.py -v
@@ -236,7 +236,29 @@ membership 爆炸等及其修复）。
 - **时间预算**：Agent 不能一天工作 73 小时
 
 ```powershell
-.\\.venv\\Scripts\\python.exe -m pytest tests/ -v --tb=line   # 87 个测试全通过
+.\\.venv\\Scripts\\python.exe -m pytest tests/ -v --tb=line   # 119 个测试全通过
+```
+
+
+## v0.4.4 生产单位与劳动力结构（Production Units & Labor Structure）
+
+建立**社会成员结构作为实验初始条件**，将生产从 Agent 个体层面提升到组织层面。
+
+| 子系统 | 核心机制 |
+|---|---|
+| **Population Structure**（`engine/economy/population.py`） | 6 部门：primary/secondary/tertiary/quaternary/public/unemployed，按 personality + education + region 分配 |
+| **Skill Profile**（§7） | Agent 拥有各部门技能（0~1），assigned sector 技能最高 |
+| **Labor Market**（`engine/economy/labor.py`） | Job openings、skill-based hiring、sector demand 驱动工资 |
+| **Production Unit**（`engine/economy/production_unit.py`） | Farm/Factory/Office 等生产组织，有 workers、capacity、inputs/outputs |
+| **Sector Transition**（§9） | Agent 可跨部门流动，受 skill/resource/demand 约束 |
+
+关键设计：
+- **Sector ≠ Occupation**：sector 是宏观结构，occupation 是具体劳动角色
+- **结构可变**：初始结构只用于 tick 0，之后由劳动力市场自然演化
+- **5 presets**：agrarian / industrial / service / knowledge / mixed
+
+```powershell
+.\\.venv\\Scripts\\python.exe -m pytest tests\\test_v044_structure.py -v   # 32 个结构/劳动力测试
 ```
 
 ## 系统架构（六层）

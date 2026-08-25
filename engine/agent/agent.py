@@ -47,6 +47,9 @@ class Agent:
     productivity: float = 0.5                              # 生产效率（§14, §15）
     resource_pressure_baseline: float = 0.2                  # v0.4.2.1: personal baseline adaptation
     activity: object = None                                  # v0.4.3.1: AgentActivity (scheduler)
+    sector: str = 'unemployed'                               # v0.4.4: primary/secondary/tertiary/quaternary/public/unemployed
+    skills: dict = None                                      # v0.4.4: skill profile per sector
+    education_level: float = 0.5                             # v0.4.4: 0~1
     employer: Optional[str] = None                         # 雇主 id（§15）
     relative_deprivation: float = 0.0                      # 相对剥夺（§25, §26）
     current_action: str = ""                               # 本 tick 行为（Inspector §46）

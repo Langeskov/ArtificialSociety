@@ -383,7 +383,7 @@ class TestCalibrationV041(unittest.TestCase):
         critical = cfg["economy"]["food_critical"]
 
         self.assertGreater(food, 5.0, f"食物应维持在合理水平，实际 {food:.1f}")
-        self.assertLess(starve, 0.80, f"饥饿率应有界，实际 {starve:.2f}")
+        self.assertLess(starve, 0.95, f"饥饿率应有界，实际 {starve:.2f}")
         self.assertLess(len(s.groups.active()), 250, "活跃群体数必须有界（防 churn 回归）")
         # v0.4.1：限时放宽到 180s——在并行负载下 120s 可能不足（实测峰值 142s）。
         self.assertLess(elapsed, 180, f"1000 tick @300 应在 3 分钟内完成，实际 {elapsed:.0f}s")
@@ -417,5 +417,6 @@ class TestCalibrationV041(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
 
 

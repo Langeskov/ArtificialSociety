@@ -26,6 +26,9 @@ from ..economy.region import RegionRegistry
 from ..crisis.tracker import CrisisManager
 from ..crisis.memory import CrisisMemory
 from ..crisis.diagnostics import OscillationDetector, FeedbackDiagnostics
+from ..economy.population import DEFAULT_STRUCTURE, normalize_structure, PopulationSnapshot, assign_sector, compute_skills
+from ..economy.labor import LaborMarket, create_initial_jobs
+from ..economy.production_unit import ProductionUnit, create_initial_units, assign_workers_to_units
 
 
 @dataclass
@@ -55,6 +58,10 @@ class Society:
     regions: Optional[RegionRegistry] = None                            # §31
     # v0.4.2: crisis state machine + resource flow accounting
     crisis_manager: CrisisManager = field(default_factory=CrisisManager)
+    labor_market: object = None                              # v0.4.4: LaborMarket
+    production_units: list = field(default_factory=list)      # v0.4.4: List[ProductionUnit]
+    initial_structure: object = None                         # v0.4.4: PopulationSnapshot at tick 0
+    agent_unit_map: dict = field(default_factory=dict)       # v0.4.4: {agent_id: unit_id}
     crisis_memory: CrisisMemory = field(default_factory=CrisisMemory)
     oscillation_detector: OscillationDetector = field(default_factory=OscillationDetector)
     feedback_diagnostics: FeedbackDiagnostics = field(default_factory=FeedbackDiagnostics)
@@ -78,9 +85,21 @@ class Society:
             self.agents = generate_population(self.config["population"], self.seed, self.config)
         self._agent_map = {a.id: a for a in self.agents}
 
+
         # v0.4.1: 区域资源模型（§31）
         region_ids = self.config.get("regions", {}).get("list", ["A", "B", "C"])
         self.regions = RegionRegistry(region_ids)
+
+        # v0.4.4: Production Units and Labor Market
+        if self.agents:
+            pop_s = self.config.get('society', {}).get('population_structure', DEFAULT_STRUCTURE)
+            pop_s = normalize_structure(pop_s)
+            self.initial_structure = PopulationSnapshot.from_agents(self.agents)
+            self.labor_market = LaborMarket()
+            self.labor_market.job_openings = create_initial_jobs(self.agents, pop_s, self.config, self.rng)
+            self.production_units = create_initial_units(self.agents, pop_s, region_ids, self.config, self.rng)
+            self.agent_unit_map = assign_workers_to_units(self.agents, self.production_units, self.rng)
+            self.labor_market.update_demand(self.agents)
 
         # v0.4.4: crisis thresholds/cooldowns are config-driven, including
         # economic_crisis (which previously had no stateful cooldown).

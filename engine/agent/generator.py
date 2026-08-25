@@ -26,6 +26,7 @@ from .personality import generate as gen_personality
 from .ideology import sample_ideology, IDEOLOGY_TEMPLATES
 from .resources import generate as gen_resources
 from ..identity.update import init_identity
+from ..economy.population import assign_sector, compute_skills, DEFAULT_STRUCTURE, normalize_structure
 
 
 def _pick_ideology(distribution: Optional[dict], rng: random.Random) -> str:
@@ -90,6 +91,15 @@ def generate_population(pop_cfg: dict, seed: int = 0, dynamics_cfg: dict | None 
         )
         a.identity = init_identity(a)          # v0.4: 从人格初始化身份（§16，无 RNG）
         a.location = loc_rng.choice(regions)    # v0.4: 初始区域（§47，独立 RNG）
+        # v0.4.4: sector + skills + education
+        pop_structure = (dynamics_cfg or {}).get('society', {}).get('population_structure', DEFAULT_STRUCTURE)
+        pop_structure = normalize_structure(pop_structure)
+        region_endow = (dynamics_cfg or {}).get('regions', {}).get('endowments', {}).get(a.location, {})
+        a.education_level = max(0.0, min(1.0, rng.gauss(0.5, 0.2)))
+        a.sector = assign_sector(a.personality, a.education_level, region_endow, rng, pop_structure)
+        a.skills = compute_skills(a.sector, a.personality, rng)
+        if a.sector != 'unemployed':
+            a.employment_status = 'employed'
         agents.append(a)
     return agents
 

@@ -3,6 +3,8 @@
 The `default_society_config()` mirrors the project plan's tunable parameters
 (§34): population, ideology distribution, personality distribution, resources,
 time scale, event frequency, movement/influence strength, and model provider.
+
+v0.4.5: Added event ecology configuration (triggers, exogenous, causal delay).
 """
 
 from __future__ import annotations
@@ -168,6 +170,75 @@ def default_society_config() -> dict:
             "decay_rate": 0.03,
             "default_duration": 20,
             "resolution_threshold": 0.05,
+            # v0.4.5 §19: 每日最大主要事件数
+            "daily_major_event_budget": 2,
+            # v0.4.5 §24: 因果延迟（防止即时递归触发）
+            "causal_delay": {
+                "min_ticks": 5,
+            },
+            # v0.4.5 §51: 每 tick 最大因果深度
+            "max_causal_depth_per_tick": 2,
+            # v0.4.5 §2: 外生事件配置（daily probability, not per-tick）
+            "exogenous": {
+                "enabled": True,
+                "natural_disaster": {"daily_probability": 0.001},
+                "pandemic": {"daily_probability": 0.0001},
+                "external_shock": {"daily_probability": 0.0005},
+            },
+            # v0.4.5 §16-§18: 触发器参数
+            "triggers": {
+                "economic_crisis": {
+                    "trigger_threshold": 0.68,
+                    "resolve_threshold": 0.45,
+                    "persistence_ticks": 100,
+                    "cooldown_days": 5,
+                },
+                "food_shortage": {
+                    "trigger_threshold": 0.25,
+                    "resolve_threshold": 0.12,
+                    "persistence_ticks": 50,
+                    "cooldown_days": 2,
+                },
+                "protest": {
+                    "trigger_threshold": 0.40,
+                    "resolve_threshold": 0.20,
+                    "persistence_ticks": 30,
+                    "cooldown_days": 2,
+                },
+                "political_movement": {
+                    "trigger_threshold": 0.55,
+                    "resolve_threshold": 0.35,
+                    "persistence_ticks": 80,
+                    "cooldown_days": 5,
+                },
+                "scandal": {
+                    "trigger_threshold": 0.50,
+                    "resolve_threshold": 0.30,
+                    "persistence_ticks": 20,
+                    "cooldown_days": 3,
+                },
+            },
+            # v0.4.2 §14–§16: 危机状态机参数
+            "crisis": {
+                "food": {
+                    "trigger_threshold": 0.25,
+                    "resolve_threshold": 0.12,
+                    "trigger_persistence_ticks": 50,
+                    "cooldown_days": 2,
+                },
+                "protest": {
+                    "trigger_threshold": 0.15,
+                    "resolve_threshold": 0.08,
+                    "trigger_persistence_ticks": 30,
+                    "cooldown_days": 2,
+                },
+                "economic": {
+                    "trigger_threshold": 0.68,
+                    "resolve_threshold": 0.45,
+                    "trigger_persistence_ticks": 100,
+                    "cooldown_days": 5,
+                },
+            },
         },
         "stability": {
             # v0.2: collapse / boundary detection (§26, §27)
@@ -215,14 +286,3 @@ def _deep_merge(base: dict, override: dict) -> dict:
         else:
             base[k] = v
     return base
-
-
-
-
-
-
-
-
-
-
-

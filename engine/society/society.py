@@ -5,6 +5,8 @@ Multiple societies run concurrently inside the SimulationEngine.
 
 v0.2: additionally owns a persistent RNG (determinism §33), a production
 multiplier (recovery §13), and a CollapseDetector (§26).
+
+v0.4.5: adds EventLoopDetector, EventEcologyDashboard, EventQueue, CausalCooldown.
 """
 
 from __future__ import annotations

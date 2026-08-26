@@ -8,6 +8,23 @@ deterministic core that does Agent/Resource/Event/Relationship updates.
 v0.2: deterministic persistent RNG per society (§33), and a stability-aware
 tick order — economy → recovery → event decay → event detection → information
 propagation → political update → memory decay → metrics → collapse detection.
+
+v0.4.5: updated tick order per §50:
+  1. Update resources
+  2. Update production / economy
+  3. Complete behaviors
+  4. Update information
+  5. Update group / identity
+  6. Calculate social state
+  7. Calculate event triggers
+  8. Rank candidate events
+  9. Apply event budget
+  10. Create endogenous events
+  11. Rare exogenous events
+  12. Apply effects
+  13. Political dynamics
+  14. Crisis state transitions
+  15. Metrics
 """
 
 from __future__ import annotations
@@ -25,6 +42,7 @@ from ..economy.deprivation import update_relative_deprivation
 from ..economy.region import update_regions
 from ..politics.politics import step_politics
 from ..event.engine import step_events
+from ..event.dashboard import EventEcologyDashboard
 from ..relationship.relationship import build_network
 from ..dynamics.decay import decay_events, decay_memory
 from ..economy.economy import step_production_recovery
@@ -83,57 +101,73 @@ class SimulationEngine:
 
         for _ in range(n):
             s.clock.advance(1)
+
             # 1. 经济基础代谢 + 税收（v0.4.1 §2：收入由 work 行为产生，不再每 tick 固定）
             collect_tax = (s.clock.tick % s.clock.ticks_per_day == 0)
             dt_days = s.clock.dt_days
             flow = step_economy(s.agents, s.config, rng, s.production_multiplier, collect_tax, dt_days)
+
             # 2. 生产恢复（§38）
             step_production_recovery(s, s.config, dt_days)
+
             # 3. 资源安全/压力更新（v0.4.1 §2–§6：连续信号）
             for a in s.agents:
                 if a.alive:
                     update_resource_state(a, s.config)
+
             # 4. 相对剥夺更新（v0.4.1 §25–§27）
             update_relative_deprivation(s.agents, s.config)
+
             # 5. 事件生命周期衰减（§10, §11），返回本 tick 解决的事件
             resolved = decay_events(s.events, s.config)
-            # 6. 事件检测（含恢复型事件，§30）
-            new_events = step_events(s, s.config, rng, resolved)
-            events_emitted.extend(new_events)
-            # 7. 行为 → 事件（v0.4.1 §9–§20 Action System：候选→可行性→效用→选择→成本结算）
+
+            # 6. 行为 → 事件（v0.4.1 §9–§20 Action System）
             if s.config.get("behavior", {}).get("enabled", True):
                 behavior_events = step_behavior(s, s.config, rng)
             else:
                 behavior_events = []
             events_emitted.extend(behavior_events)
+
+            # 7. 信息传播（v0.4 §25–§39：Event → Information → Belief）
+            if s.config.get("information", {}).get("enabled", True):
+                step_information(s, s.config, rng, list(behavior_events))
+            else:
+                propagate_information(s, s.config, rng)
+
             # 8. 群体资源池（v0.4.1 §21–§24 贡献/分配/反馈）
             if s.config.get("groups", {}).get("enabled", True):
                 step_group_resources(s, s.config, rng)
-            # 9. 信息传播（v0.4 §25–§39：Event → Information → Belief）
-            #    information.enabled=false 时回退到 v0.3.1 核心事件学习（recent_events → politics）
-            if s.config.get("information", {}).get("enabled", True):
-                step_information(s, s.config, rng, list(new_events) + behavior_events)
-            else:
-                propagate_information(s, s.config, rng)
-            # 10. 群体形成 + 生命周期（v0.4 §5–§12）
+
+            # 9. 群体形成 + 生命周期（v0.4 §5–§12）
             if s.config.get("groups", {}).get("enabled", True):
                 step_formation(s, s.config, rng)
                 step_lifecycle(s, s.config, rng)
-            # 11. 群体影响 + 身份更新（v0.4 §20–§21, §16, §53）
+
+            # 10. 群体影响 + 身份更新（v0.4 §20–§21, §16, §53）
             if s.config.get("groups", {}).get("enabled", True):
                 apply_group_influence(s, s.config)
             if s.config.get("identity", {}).get("enabled", True):
                 step_identity(s, s.config)
+
+            # 11. v0.4.5 §50: 事件检测（含恢复型事件）
+            #     信息传播在事件检测之前，这样事件可以基于信息状态触发
+            new_events = step_events(s, s.config, rng, resolved)
+            events_emitted.extend(new_events)
+
             # 12. 政治更新（惯性 + 阻尼 + 个体化响应，§3–§9；使用 v0.4 identity）
             step_politics(s, s.config, rng, s._network)
+
             # 13. 区域资源更新（v0.4.1 §31：统计 + 价格）
             update_regions(s, s.config)
+
             # 14. LLM 决策（默认关闭 §32）
             self._maybe_llm_decisions(s, provider, rng)
+
             # 15. 记忆衰减（§21）+ 危机记忆（v0.4.2 §22-§23）
             for a in s.agents:
                 if a.alive and a.recent_events:
                     decay_memory(a, memory_decay, memory_size)
+
             # 危机记忆衰减 + 记录新危机
             s.crisis_memory.decay()
             cm = s.crisis_manager
@@ -141,6 +175,9 @@ class SimulationEngine:
                 s.crisis_memory.record_food_crisis(cm.food.severity)
             if cm.protest.is_crisis():
                 s.crisis_memory.record_protest(cm.protest.severity)
+            if cm.economic.is_crisis():
+                s.crisis_memory.record_economic_crisis(cm.economic.severity)
+
             # v0.4.2 §31/§34: 振荡检测 + 反馈诊断
             alive_agents = [a for a in s.agents if a.alive]
             if alive_agents:
@@ -154,10 +191,10 @@ class SimulationEngine:
         if len(s.metrics_history) > 2000:
             s.metrics_history = s.metrics_history[-2000:]
 
-        # 12. 社会状态诊断（v0.4 §54，每 step 一次，不每 tick）
+        # 社会状态诊断（v0.4 §54，每 step 一次，不每 tick）
         s.social_state = classify_social_state(s, metrics)
 
-        # 9. 崩溃检测 + 边界集中检测（§26, §27）
+        # 崩溃检测 + 边界集中检测（§26, §27）
         stab = s.config.get("stability", {})
         bc = boundary_concentration(s.agents, threshold=0.95)
         boundary_ratio = max(bc.values()) if bc else 0.0
@@ -186,19 +223,48 @@ class SimulationEngine:
     def inject_event(self, society_id: str, event_type: str, severity: float = 0.8) -> Optional[dict]:
         """Inject an exogenous event (for tests / demonstrations, §34)."""
         from ..event.engine import _apply_effects, DURATION, TYPE_LABEL
+        from ..event.event import SOURCE_TYPE, EVENT_SOURCE_MAP, EVENT_SCOPE
         s = self.get(society_id)
         if s is None:
             return None
         rng = s.rng or random.Random(s.seed)
+        source_type = EVENT_SOURCE_MAP.get(event_type, SOURCE_TYPE.EXOGENOUS)
         event = s.events.make(
             s.clock.tick, event_type,
             severity=severity,
             description=f"注入事件：{TYPE_LABEL.get(event_type, event_type)}",
             duration=DURATION.get(event_type, 20),
             intensity=severity,
+            source_type=source_type,
+            scope=EVENT_SCOPE.SOCIETY,
         )
         _apply_effects(s, event, [a for a in s.agents if a.alive], rng)
         return event.as_dict()
+
+    def get_event_ecology(self, society_id: str) -> Optional[dict]:
+        """v0.4.5: Get event ecology diagnostics for a society."""
+        s = self.get(society_id)
+        if s is None:
+            return None
+        dashboard = EventEcologyDashboard()
+        stats = dashboard.compute(s.events, s.clock.tick)
+        return {
+            "report": dashboard.format_report(stats),
+            "causality_scorecard": dashboard.format_causality_scorecard(s.events),
+            "stats": {
+                "total_events": stats.total_events,
+                "endogenous_count": stats.endogenous_count,
+                "exogenous_count": stats.exogenous_count,
+                "recovery_count": stats.recovery_count,
+                "uncaused_count": stats.uncaused_count,
+                "loop_count": stats.loop_count,
+                "strong_loop_count": stats.strong_loop_count,
+                "event_diversity": round(stats.event_diversity, 4),
+                "endogenous_ratio": round(stats.endogenous_ratio, 4),
+                "exogenous_ratio": round(stats.exogenous_ratio, 4),
+                "recovery_ratio": round(stats.recovery_ratio, 4),
+            },
+        }
 
     def _maybe_llm_decisions(self, s: Society, provider: ModelProvider, rng: random.Random) -> None:
         """Let a small fraction of LLM-level agents make a structured decision."""

@@ -172,6 +172,50 @@ events:
   decay_rate: 0.03
   default_duration: 20
   resolution_threshold: 0.05
+  # v0.4.5 §19: 每日最大主要事件数
+  daily_major_event_budget: 2
+  # v0.4.5 §24: 因果延迟（防止即时递归触发）
+  causal_delay:
+    min_ticks: 5
+  # v0.4.5 §51: 每 tick 最大因果深度
+  max_causal_depth_per_tick: 2
+  # v0.4.5 §2: 外生事件配置（daily probability, not per-tick）
+  exogenous:
+    enabled: true
+    natural_disaster:
+      daily_probability: 0.001
+    pandemic:
+      daily_probability: 0.0001
+    external_shock:
+      daily_probability: 0.0005
+  # v0.4.5 §16-§18: 触发器参数（persistence/hysteresis/cooldown）
+  # 注意：这些参数会覆盖 triggers.py 中的默认值
+  triggers:
+    economic_crisis:
+      trigger_threshold: 0.68
+      resolve_threshold: 0.45
+      persistence_ticks: 100
+      cooldown_days: 5
+    food_shortage:
+      trigger_threshold: 0.25
+      resolve_threshold: 0.12
+      persistence_ticks: 50
+      cooldown_days: 2
+    protest:
+      trigger_threshold: 0.40
+      resolve_threshold: 0.20
+      persistence_ticks: 30
+      cooldown_days: 2
+    political_movement:
+      trigger_threshold: 0.55
+      resolve_threshold: 0.35
+      persistence_ticks: 80
+      cooldown_days: 5
+    scandal:
+      trigger_threshold: 0.50
+      resolve_threshold: 0.30
+      persistence_ticks: 20
+      cooldown_days: 3
   # v0.4.2 §14–§16: 危机状态机参数
   crisis:
     food:
@@ -207,14 +251,3 @@ axes:
   x: { name: "经济自由 ↔ 经济管控", positive: "经济自由", negative: "经济管控" }
   y: { name: "自由 ↔ 权威", positive: "权威", negative: "自由" }
   z: { name: "个人主义 ↔ 集体主义", positive: "个人主义", negative: "集体主义" }
-
-
-
-
-
-
-
-
-
-
-

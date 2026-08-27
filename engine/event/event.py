@@ -145,7 +145,7 @@ class Event:
             "cause_mechanism": self.cause_mechanism,
             "trigger_score": round(self.trigger_score, 4),
             "causal_confidence": round(self.causal_confidence, 4),
-            "evidence": {k: round(v, 4) for k, v in self.evidence.items()},
+            "evidence": {k: round(v, 4) if isinstance(v, (int, float)) else v for k, v in self.evidence.items()},
             "scope": self.scope.value,
             "region": self.region,
             "affected_agents": list(self.affected_agents),

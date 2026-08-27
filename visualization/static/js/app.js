@@ -101,7 +101,8 @@
 
   // ---- 创建 / 控制 ------------------------------------------------------
   function fmtTime(clock) {
-    return `第 ${clock.year} 年 | 第 ${clock.day} 日 | Tick ${clock.tick}`;
+    const totalDays = clock.simulated_days || (clock.tick / (clock.ticks_per_day || 100));
+    return `第 ${clock.year} 年 第 ${clock.month} 月 第 ${clock.day} 日 | 模拟第 ${totalDays.toFixed(1)} 天 | Tick ${clock.tick}`;
   }
 
   async function createSociety() {

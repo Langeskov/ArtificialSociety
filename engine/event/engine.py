@@ -526,7 +526,7 @@ def step_events(society, cfg: dict, rng: random.Random, resolved: Optional[list]
                     duration=DURATION["government_response"],
                     intensity=e.severity * 0.7,
                     source_type=SOURCE_TYPE.ENDOGENOUS,
-                    evidence={"trigger_event": e.event_id},
+                    evidence={"trigger_event_severity": e.severity},
                 )
 
     # --- Event budget (§19): limit major events per day ---

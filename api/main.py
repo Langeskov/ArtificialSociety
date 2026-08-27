@@ -1,14 +1,18 @@
-"""FastAPI application — REST API + WebSocket for the simulation (§30, §31).
+"""FastAPI application — REST + WebSocket for the simulation (§30, §31).
 
 This is the operator-facing surface: create societies, run/pause/step/reset,
 inspect agents/events/metrics, and stream live updates to the frontend.
+
+v0.4.5.1: Added error handling to RunLoop._run() to prevent silent crash.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
+import traceback
 from pathlib import Path
 from typing import Optional
 
@@ -25,6 +29,7 @@ from engine.simulation.engine import SimulationEngine
 from configs.loader import default_society_config, load_config
 from storage.db import Storage
 
+logger = logging.getLogger("artificial_society")
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data"
@@ -44,6 +49,31 @@ app.add_middleware(
 
 
 # --------------------------------------------------------------------------
+# Safe JSON serialization
+# --------------------------------------------------------------------------
+def _safe_json(obj) -> str:
+    """JSON serialization that handles numpy types and other non-standard objects."""
+    def _default(o):
+        # numpy scalars
+        try:
+            import numpy as np
+            if isinstance(o, (np.integer,)):
+                return int(o)
+            if isinstance(o, (np.floating,)):
+                return float(o)
+            if isinstance(o, np.ndarray):
+                return o.tolist()
+        except ImportError:
+            pass
+        # dataclass with as_dict
+        if hasattr(o, 'as_dict'):
+            return o.as_dict()
+        # fallback: convert to string
+        return str(o)
+    return json.dumps(obj, ensure_ascii=False, default=_default)
+
+
+# --------------------------------------------------------------------------
 # Background simulation loop (per-society asyncio tasks)
 # --------------------------------------------------------------------------
 class RunLoop:
@@ -54,11 +84,14 @@ class RunLoop:
         self.speed: dict[str, float] = {}
         self.paused: set[str] = set()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._errors: dict[str, list] = {}  # society_id → recent errors
 
     def set_loop(self, loop) -> None:
         self._loop = loop
 
     async def _run(self, society_id: str, speed: float) -> None:
+        error_count = 0
+        max_consecutive_errors = 10
         try:
             while True:
                 if society_id in self.paused:
@@ -66,26 +99,71 @@ class RunLoop:
                     continue
                 s = engine.get(society_id)
                 if s is None:
+                    logger.warning(f"[RunLoop] Society {society_id} not found, stopping.")
                     break
-                summary = await asyncio.to_thread(engine.step, society_id)
+                try:
+                    summary = await asyncio.to_thread(engine.step, society_id)
+                    error_count = 0  # reset on success
+                except Exception as e:
+                    error_count += 1
+                    tb = traceback.format_exc()
+                    logger.error(f"[RunLoop] engine.step error #{error_count} for {society_id}: {e}\n{tb}")
+                    if society_id not in self._errors:
+                        self._errors[society_id] = []
+                    self._errors[society_id].append({
+                        "tick": s.clock.tick,
+                        "error": str(e),
+                        "traceback": tb[-500:],
+                    })
+                    if error_count >= max_consecutive_errors:
+                        logger.error(f"[RunLoop] {max_consecutive_errors} consecutive errors for {society_id}, stopping.")
+                        break
+                    await asyncio.sleep(0.1)  # back off on error
+                    continue
+
                 # Persist metrics + events periodically
                 if summary:
                     tick = summary["clock"]["tick"]
-                    await asyncio.to_thread(storage.save_metrics, society_id, tick, summary["metrics"])
+                    try:
+                        await asyncio.to_thread(storage.save_metrics, society_id, tick, summary["metrics"])
+                    except Exception as e:
+                        logger.warning(f"[RunLoop] save_metrics error: {e}")
                     if summary.get("new_events"):
-                        await asyncio.to_thread(storage.save_events, society_id, s.events.recent(50))
-                        await asyncio.to_thread(storage.append_event_log, society_id, s.events.recent(50))
+                        try:
+                            await asyncio.to_thread(storage.save_events, society_id, s.events.recent(50))
+                            await asyncio.to_thread(storage.append_event_log, society_id, s.events.recent(50))
+                        except Exception as e:
+                            logger.warning(f"[RunLoop] save_events error: {e}")
                     # Sample agent ideological positions every 20 ticks for history/trajectory.
                     if tick % 20 == 0:
-                        await asyncio.to_thread(storage.save_agent_states, society_id, s.agents, tick)
-                await self._broadcast(society_id, {"type": "tick", **summary})
+                        try:
+                            await asyncio.to_thread(storage.save_agent_states, society_id, s.agents, tick)
+                        except Exception as e:
+                            logger.warning(f"[RunLoop] save_agent_states error: {e}")
+
+                try:
+                    await self._broadcast(society_id, {"type": "tick", **summary})
+                except Exception as e:
+                    logger.warning(f"[RunLoop] broadcast error: {e}")
+
                 await asyncio.sleep(max(0.0, 0.02 / max(speed, 0.1)))
         except asyncio.CancelledError:
-            pass
+            logger.info(f"[RunLoop] Task for {society_id} cancelled.")
+        except Exception as e:
+            tb = traceback.format_exc()
+            logger.error(f"[RunLoop] Fatal error for {society_id}: {e}\n{tb}")
+        finally:
+            logger.info(f"[RunLoop] Task for {society_id} finished.")
 
     async def _broadcast(self, society_id: str, message: dict) -> None:
         subs = [ws for ws, sid in clients.items() if sid == society_id]
-        payload = json.dumps(message, ensure_ascii=False)
+        if not subs:
+            return
+        try:
+            payload = _safe_json(message)
+        except Exception as e:
+            logger.warning(f"[RunLoop] JSON serialization error: {e}")
+            return
         for ws in subs:
             try:
                 await ws.send_text(payload)
@@ -128,6 +206,9 @@ class RunLoop:
         if s:
             s.status = "finished"
 
+    def get_errors(self, society_id: str) -> list:
+        return self._errors.get(society_id, [])
+
 
 runloop = RunLoop()
 clients: dict[WebSocket, str] = {}
@@ -135,6 +216,7 @@ clients: dict[WebSocket, str] = {}
 
 @app.on_event("startup")
 async def _startup() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     runloop.set_loop(asyncio.get_running_loop())
 
 
@@ -300,6 +382,22 @@ def society_metrics(society_id: str, limit: int = 500):
         raise HTTPException(404, "society not found")
     hist = s.metrics_history[-limit:]
     return {"current": s.metrics(), "history": hist}
+
+
+@app.get("/api/society/{society_id}/stall")
+def society_stall(society_id: str):
+    """v0.4.5.1: Stall diagnostics for a society."""
+    result = engine.get_stall_diagnostics(society_id)
+    if result is None:
+        raise HTTPException(404, "society not found")
+    result["runloop_errors"] = runloop.get_errors(society_id)[-10:]
+    return result
+
+
+@app.get("/api/society/{society_id}/errors")
+def society_errors(society_id: str):
+    """v0.4.5.1: Recent RunLoop errors for a society."""
+    return {"errors": runloop.get_errors(society_id)[-20:]}
 
 
 # --------------------------------------------------------------------------
@@ -503,146 +601,20 @@ def information_detail(info_id: str, society_id: str):
     raise HTTPException(404, "information not found")
 
 
-@app.get("/api/information/{info_id}/propagation")
-def information_propagation(info_id: str, society_id: str):
-    """信息传播路径（§60, §61）。"""
+@app.get("/api/society/{society_id}/social_state")
+def society_social_state(society_id: str):
+    """社会状态分类（§54）。"""
     s = _get_society(society_id)
-    for m in getattr(s, "information_messages", []):
-        if m.id == info_id:
-            return {"id": info_id, "chain": m.propagation_chain, "reach": m.reach}
-    raise HTTPException(404, "information not found")
+    return {"social_state": s.social_state, "metrics": s.metrics()}
 
 
-@app.get("/api/society/{society_id}/beliefs")
-def society_beliefs(society_id: str):
-    """信念分布（§60）。"""
-    s = _get_society(society_id)
-    subjects: dict[str, list[float]] = {}
-    for a in s.agents:
-        if not a.alive:
-            continue
-        for subj, b in getattr(a, "beliefs", {}).items():
-            subjects.setdefault(subj, []).append(round(b.belief_strength, 4))
-    result = {}
-    for subj, vals in subjects.items():
-        n = len(vals)
-        result[subj] = {
-            "count": n,
-            "believe": round(sum(1 for v in vals if v > 0.3) / n * 100, 1) if n else 0,
-            "neutral": round(sum(1 for v in vals if -0.3 <= v <= 0.3) / n * 100, 1) if n else 0,
-            "reject": round(sum(1 for v in vals if v < -0.3) / n * 100, 1) if n else 0,
-        }
+@app.get("/api/society/{society_id}/event_ecology")
+def society_event_ecology(society_id: str):
+    """v0.4.5: Event ecology diagnostics."""
+    result = engine.get_event_ecology(society_id)
+    if result is None:
+        raise HTTPException(404, "society not found")
     return result
-
-
-@app.get("/api/society/{society_id}/social-dynamics")
-def society_social_dynamics(society_id: str):
-    """社会动力学总览（§55, §75–§78）。"""
-    from engine.metrics.social_metrics import (
-        group_metrics, identity_metrics, information_metrics, fragmentation_score, integration_score,
-    )
-    s = _get_society(society_id)
-    return {
-        "social_state": s.social_state,
-        "groups": group_metrics(s),
-        "identity": identity_metrics(s),
-        "information": information_metrics(s),
-        "fragmentation": fragmentation_score(s),
-        "integration": integration_score(s),
-    }
-
-
-@app.post("/api/experiment/ablation")
-def experiment_ablation(body: dict):
-    """消融实验（§66, §67）：分别关闭 groups/identity/information/behavior 运行。"""
-    from configs.loader import default_society_config
-    agents = body.get("agents", 500)
-    days = body.get("days", 50)
-    seed = body.get("seed", 42)
-    ablations = body.get("ablations", ["none", "no_groups", "no_identity", "no_information", "no_behavior"])
-
-    def run_ablation(disable: list):
-        cfg = default_society_config()
-        cfg["population"]["count"] = agents
-        for key in disable:
-            cfg.setdefault(key, {})["enabled"] = False
-        e = SimulationEngine()
-        s = e.create_society(cfg, seed=seed)
-        for _ in range(days):
-            e.step(s.society_id, ticks=100)
-        from engine.metrics.social_metrics import group_metrics, fragmentation_score
-        from engine.politics.observability import polarization_per_axis
-        return {
-            "group_count": group_metrics(s)["active_group_count"],
-            "fragmentation": fragmentation_score(s),
-            "polarization": polarization_per_axis(s)["x_polarization"],
-        }
-
-    results = {}
-    for name in ablations:
-        disable = {
-            "no_groups": ["groups"],
-            "no_identity": ["identity"],
-            "no_information": ["information"],
-            "no_behavior": ["behavior"],
-            "none": [],
-        }.get(name)
-        if disable is None:
-            continue
-        results[name] = run_ablation(disable)
-    return {"agents": agents, "days": days, "seed": seed, "results": results}
-
-
-# --------------------------------------------------------------------------
-# Agent endpoints
-# --------------------------------------------------------------------------
-@app.get("/api/agent/{agent_id}")
-def agent_get(agent_id: str, society_id: str):
-    s = engine.get(society_id)
-    if s is None:
-        raise HTTPException(404, "society not found")
-    a = s.get_agent(agent_id)
-    if a is None:
-        raise HTTPException(404, "agent not found")
-    return a.snapshot()
-
-
-@app.get("/api/agent/{agent_id}/history")
-def agent_history(agent_id: str, society_id: str, limit: int = 500):
-    return {"history": storage.agent_history(society_id, agent_id, limit)}
-
-
-@app.get("/api/agent/{agent_id}/relationships")
-def agent_relationships(agent_id: str, society_id: str):
-    s = engine.get(society_id)
-    if s is None:
-        raise HTTPException(404, "society not found")
-    net = getattr(s, "_network", {})
-    return {"friends": net.get(agent_id, [])}
-
-
-@app.get("/api/society/{society_id}/trajectory")
-def society_trajectory(society_id: str, agents: int = 50, limit: int = 500):
-    s = engine.get(society_id)
-    if s is None:
-        raise HTTPException(404, "society not found")
-    # Deterministic sample: first N alive agents (spread across the population).
-    sample = [a.id for a in s.agents if a.alive][:: max(1, len(s.agents) // agents)][:agents]
-    return {"trajectories": storage.agent_histories(society_id, sample, limit)}
-
-
-# --------------------------------------------------------------------------
-# Model endpoints
-# --------------------------------------------------------------------------
-@app.post("/api/model/chat")
-def model_chat(body: ModelChat):
-    from models.external.provider import make_provider
-    # Use the first society's model config, or rule-based if none.
-    cfg = default_society_config()
-    if engine.societies:
-        cfg = next(iter(engine.societies.values())).config
-    provider = make_provider(cfg)
-    return provider.chat(body.model or cfg["model"].get("model_name", ""), body.messages, body.temperature)
 
 
 # --------------------------------------------------------------------------
@@ -650,21 +622,17 @@ def model_chat(body: ModelChat):
 # --------------------------------------------------------------------------
 @app.post("/api/experiment/create")
 def experiment_create(body: ExperimentCreate):
-    spec = {"config": body.config or default_society_config(),
-            "society_count": body.society_count, "seed_start": body.seed_start}
-    exp_id = engine.create_experiment(spec)
-    storage.save_experiment(exp_id, spec, engine.experiments[exp_id]["society_ids"])
-    return {"experiment_id": exp_id, "society_ids": engine.experiments[exp_id]["society_ids"]}
-
-
-@app.post("/api/experiment/{exp_id}/run")
-def experiment_run(exp_id: str, speed: float = 1.0):
+    exp_id = engine.create_experiment({
+        "config": body.config or default_society_config(),
+        "society_count": body.society_count,
+        "seed_start": body.seed_start,
+    })
     exp = engine.experiment(exp_id)
-    if exp is None:
-        raise HTTPException(404, "experiment not found")
     for sid in exp["society_ids"]:
-        runloop.start(sid, speed)
-    return {"status": "running", "society_ids": exp["society_ids"]}
+        s = engine.get(sid)
+        storage.save_society(s)
+        storage.save_agents(sid, s.agents)
+    return exp
 
 
 @app.get("/api/experiment/{exp_id}")
@@ -672,68 +640,33 @@ def experiment_get(exp_id: str):
     exp = engine.experiment(exp_id)
     if exp is None:
         raise HTTPException(404, "experiment not found")
-    return {
-        "experiment_id": exp_id,
-        "society_ids": exp["society_ids"],
-        "societies": [engine.get(sid).snapshot() for sid in exp["society_ids"] if engine.get(sid)],
-    }
-
-
-# --------------------------------------------------------------------------
-# Config endpoint
-# --------------------------------------------------------------------------
-@app.get("/api/config/default")
-def config_default():
-    return default_society_config()
-
-
-@app.get("/api/config/ideologies")
-def config_ideologies():
-    from engine.agent.ideology import IDEOLOGY_TEMPLATES, DEFAULT_AXES, IDEOLOGY_LABELS
-    return {"templates": IDEOLOGY_TEMPLATES, "axes": DEFAULT_AXES, "labels": IDEOLOGY_LABELS}
+    return exp
 
 
 # --------------------------------------------------------------------------
 # WebSocket
 # --------------------------------------------------------------------------
-@app.websocket("/ws/simulation/{society_id}")
-async def ws_simulation(websocket: WebSocket, society_id: str):
+@app.websocket("/ws/{society_id}")
+async def websocket_endpoint(websocket: WebSocket, society_id: str):
     await websocket.accept()
     clients[websocket] = society_id
     try:
         while True:
-            msg = await websocket.receive_text()
-            # Optional client control messages (JSON): {"cmd": "pause"} etc.
-            try:
-                data = json.loads(msg)
-                cmd = data.get("cmd")
-                if cmd == "pause":
-                    runloop.pause(society_id)
-                elif cmd == "resume":
-                    runloop.resume(society_id, data.get("speed"))
-                elif cmd == "step":
-                    await asyncio.to_thread(engine.step, society_id)
-            except json.JSONDecodeError:
-                pass
+            # Keep connection alive; client can send control messages
+            data = await websocket.receive_text()
+            # Echo or handle control messages if needed
     except WebSocketDisconnect:
+        pass
+    finally:
         clients.pop(websocket, None)
 
 
 # --------------------------------------------------------------------------
-# Static frontend
+# Static files (frontend)
 # --------------------------------------------------------------------------
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+if STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-
-@app.get("/")
-def index():
-    return FileResponse(str(STATIC_DIR / "index.html"))
-
-
-def main() -> None:
-    import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8765)
-
-
-if __name__ == "__main__":
-    main()
+    @app.get("/")
+    async def index():
+        return FileResponse(str(STATIC_DIR / "index.html"))

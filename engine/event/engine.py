@@ -133,9 +133,12 @@ def _compute_trigger_context(society, agents: Sequence[Agent], cfg: dict) -> dic
     # Information spread (from information system)
     information_spread = 0.3
     if hasattr(society, 'information_messages') and society.information_messages:
-        recent_msgs = [m for m in society.information_messages
-                       if tick - m.get("tick", 0) < ticks_per_day * 5]
-        information_spread = min(1.0, len(recent_msgs) / max(len(agents), 1))
+        recent_count = 0
+        for m in society.information_messages:
+            msg_tick = getattr(m, 'created_tick', None) or (m.get("tick", 0) if isinstance(m, dict) else 0)
+            if tick - msg_tick < ticks_per_day * 5:
+                recent_count += 1
+        information_spread = min(1.0, recent_count / max(len(agents), 1))
 
     # Persistent grievance: from crisis memory
     crisis_memory = getattr(society, "crisis_memory", None)

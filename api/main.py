@@ -646,7 +646,7 @@ def experiment_get(exp_id: str):
 # --------------------------------------------------------------------------
 # WebSocket
 # --------------------------------------------------------------------------
-@app.websocket("/ws/{society_id}")
+@app.websocket("/ws/simulation/{society_id}")
 async def websocket_endpoint(websocket: WebSocket, society_id: str):
     await websocket.accept()
     clients[websocket] = society_id
@@ -659,6 +659,77 @@ async def websocket_endpoint(websocket: WebSocket, society_id: str):
         pass
     finally:
         clients.pop(websocket, None)
+
+
+# --------------------------------------------------------------------------
+# Agent detail endpoints (frontend expects /api/agent/{id})
+# --------------------------------------------------------------------------
+@app.get("/api/agent/{agent_id}")
+def agent_detail(agent_id: str, society_id: str):
+    """Agent detail for inspector panel."""
+    s = _get_society(society_id)
+    a = s.get_agent(agent_id)
+    if a is None:
+        raise HTTPException(404, "agent not found")
+    return a.snapshot()
+
+
+@app.get("/api/agent/{agent_id}/history")
+def agent_history(agent_id: str, society_id: str, limit: int = 500):
+    """Agent political position history from storage."""
+    s = _get_society(society_id)
+    a = s.get_agent(agent_id)
+    if a is None:
+        raise HTTPException(404, "agent not found")
+    # Try to load from storage
+    history = []
+    try:
+        history = storage.agent_history(society_id, agent_id, limit)
+    except Exception:
+        pass
+    return {"agent_id": agent_id, "history": history}
+
+
+# --------------------------------------------------------------------------
+# Config endpoints (frontend expects /api/config/ideologies)
+# --------------------------------------------------------------------------
+@app.get("/api/config/ideologies")
+def config_ideologies():
+    """Ideology templates with colors for frontend rendering."""
+    from engine.agent.ideology import IDEOLOGY_TEMPLATES
+    templates = {}
+    for name, tpl in IDEOLOGY_TEMPLATES.items():
+        templates[name] = {
+            "x": tpl.get("center", (0, 0, 0))[0],
+            "y": tpl.get("center", (0, 0, 0))[1],
+            "z": tpl.get("center", (0, 0, 0))[2],
+            "color": tpl.get("color", "#888888"),
+        }
+    axes = {
+        "x": {"name": "经济自由 ↔ 经济管控", "positive": "经济自由", "negative": "经济管控"},
+        "y": {"name": "自由 ↔ 权威", "positive": "权威", "negative": "自由"},
+        "z": {"name": "个人主义 ↔ 集体主义", "positive": "个人主义", "negative": "集体主义"},
+    }
+    return {"templates": templates, "axes": axes}
+
+
+# --------------------------------------------------------------------------
+# Trajectory endpoint (frontend expects /api/society/{id}/trajectory)
+# --------------------------------------------------------------------------
+@app.get("/api/society/{society_id}/trajectory")
+def society_trajectory(society_id: str, agents: int = 50, limit: int = 500):
+    """Agent trajectory data for 3D visualization."""
+    s = _get_society(society_id)
+    # Sample agents for trajectory
+    alive = [a for a in s.agents if a.alive]
+    sample = alive[:agents] if len(alive) > agents else alive
+    agent_ids = [a.id for a in sample]
+    trajectories = {}
+    try:
+        trajectories = storage.agent_histories(society_id, agent_ids, limit)
+    except Exception:
+        pass
+    return {"trajectories": trajectories}
 
 
 # --------------------------------------------------------------------------

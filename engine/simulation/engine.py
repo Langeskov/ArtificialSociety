@@ -64,8 +64,6 @@ class SimulationEngine:
         self.societies: dict[str, Society] = {}
         self.experiments: dict[str, dict] = {}
         self._lock = threading.Lock()
-        # v0.4.5.1: Tick progress watchdog
-        self._watchdog = TickProgressWatchdog()
 
     # -- society lifecycle -------------------------------------------------
     def create_society(self, config: dict, society_id: Optional[str] = None, seed: Optional[int] = None) -> Society:
@@ -79,6 +77,7 @@ class SimulationEngine:
         s._zero_progress = ZeroProgressDetector(
             stall_threshold_ticks=stall_cfg.get("agent_stall_threshold_ticks", 500)
         )
+        s._watchdog = TickProgressWatchdog()
         with self._lock:
             self.societies[sid] = s
         return s
@@ -116,8 +115,10 @@ class SimulationEngine:
             s.clock.advance(1)
             tick_after = s.clock.tick
 
-            # v0.4.5.1 §12: Tick progress watchdog
-            self._watchdog.check(tick_after)
+            # v0.4.5.1 §12: Tick progress watchdog (per-society)
+            watchdog = getattr(s, '_watchdog', None)
+            if watchdog:
+                watchdog.check(tick_after)
 
             # 1. Advance current Actions (v0.4.5.1 §28: actions first after clock)
             behavior_events = step_behavior(s, s.config, rng)

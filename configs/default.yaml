@@ -233,6 +233,10 @@ events:
       resolve_threshold: 0.45
       trigger_persistence_ticks: 100
       cooldown_days: 5
+    # v0.4.5.2: Recovery parameters
+    recovery:
+      max_recovery_ticks: 500
+      base_recovery_rate: 0.02
 
 stability:
   collapse_variance_threshold: 0.02

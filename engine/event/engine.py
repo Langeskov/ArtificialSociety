@@ -1,13 +1,12 @@
-"""Event Engine — v0.4.5: Event Ecology & Causal Dynamics.
+"""Event Engine — v0.4.5.2: Crisis State Synchronization.
 
-Major changes from v0.4.4:
-  - All endogenous events use Trigger Registry with causal evidence
-  - Exogenous events use daily probability (not per-tick)
-  - Events carry source_type (ENDOGENOUS/EXOGENOUS/RECOVERY)
-  - Event Queue with causal delay prevents immediate recursion
-  - Causal memory prevents A→B→A loops
-  - Recovery events are state transition notifications, not new shocks
-  - No random event roulette (natural_disaster/technology_breakthrough/resource_boom/scandal)
+Key changes from v0.4.5.1:
+  - CrisisManager is Single Source of Truth for crisis state
+  - Event Engine consumes CrisisTransition (not compares states itself)
+  - Recovery notifications at RECOVERING start (not just COOLDOWN)
+  - Resolved notifications at RECOVERING→COOLDOWN
+  - Per-society trigger registry (no global singleton state)
+  - Triggers are stateless scoring functions
 """
 
 from __future__ import annotations
@@ -19,15 +18,20 @@ from ..agent.agent import Agent
 from ..metrics.metrics import compute_social_temperature
 from .event import Event, EventChain, SOURCE_TYPE, EVENT_SCOPE, EVENT_SOURCE_MAP
 from .triggers import (
-    EventTrigger, TriggerEvidence, get_trigger, get_endogenous_triggers,
+    EventTrigger, TriggerEvidence, create_trigger_registry,
 )
 from .queue import EventQueue, CausalCooldown
+from ..crisis.tracker import CrisisTransition
 
 
-# Recovery notifications — must not push political coordinates or re-trigger crises
-RECOVERY_EVENT_TYPES = {"recovery", "food_stabilization", "economic_recovery", "resource_stabilization"}
+# Recovery notification event types
+RECOVERY_EVENT_TYPES = {"recovery", "food_stabilization", "economic_recovery",
+                        "resource_stabilization", "protest_resolved",
+                        "economic_crisis_resolved", "food_crisis_resolved",
+                        "economic_recovery_started", "food_stabilization_started",
+                        "recovery_started"}
 
-# 事件类型 → 生命周期时长（tick）
+# Event type → lifecycle duration (ticks)
 DURATION: dict[str, int] = {
     "food_shortage": 40,
     "economic_crisis": 60,
@@ -54,6 +58,13 @@ DURATION: dict[str, int] = {
     "group_split": 25,
     "pandemic": 50,
     "external_shock": 30,
+    # v0.4.5.2: Recovery lifecycle events
+    "economic_recovery_started": 15,
+    "food_stabilization_started": 15,
+    "recovery_started": 15,
+    "economic_crisis_resolved": 10,
+    "food_crisis_resolved": 10,
+    "protest_resolved": 10,
 }
 
 TYPE_LABEL = {
@@ -82,55 +93,40 @@ TYPE_LABEL = {
     "group_split": "群体分裂",
     "pandemic": "瘟疫",
     "external_shock": "外部冲击",
+    # v0.4.5.2
+    "economic_recovery_started": "经济恢复开始",
+    "food_stabilization_started": "粮食企稳开始",
+    "recovery_started": "恢复开始",
+    "economic_crisis_resolved": "经济危机解决",
+    "food_crisis_resolved": "粮食危机解决",
+    "protest_resolved": "抗议平息",
 }
-
-
-def _temp_modifier(temperature: float) -> float:
-    """社会温度映射为事件概率倍率：低温 → 0，高温 → 放大。"""
-    if temperature < 0.30:
-        return 0.0
-    if temperature > 0.90:
-        return 3.0
-    return (temperature - 0.30) / 0.60 * 3.0
 
 
 def _has_active(chain: EventChain, event_type: str) -> bool:
     return any(e.type == event_type and e.is_active for e in chain.events)
 
 
-def _has_recent(chain: EventChain, event_type: str, tick: int, window: int) -> bool:
-    """Whether a notification of this type was emitted recently."""
-    return any(e.type == event_type and tick - e.tick <= window for e in chain.events)
-
-
 def _compute_trigger_context(society, agents: Sequence[Agent], cfg: dict) -> dict:
-    """Compute context variables needed by multiple triggers.
-
-    This avoids recomputing expensive metrics for each trigger separately.
-    """
+    """Compute context variables needed by triggers."""
     if not agents:
         return {}
 
     tick = society.clock.tick
     ticks_per_day = cfg.get("ticks_per_day", 100)
 
-    # Production gap: difference between production capacity and consumption
     production_disruption = getattr(society, "production_disruption", 0.0)
     production_gap = min(1.0, max(0.0, production_disruption))
 
-    # Unemployment
     unemployed = sum(1 for a in agents if getattr(a, 'sector', '') == 'unemployed')
     unemployment = unemployed / len(agents)
 
-    # Broke / starving
     broke = sum(1 for a in agents if a.resources.is_broke()) / len(agents)
     starving = sum(1 for a in agents if a.resources.is_starving()) / len(agents)
 
-    # Average food stock
     avg_food = sum(a.resources.values.get("food", 0) for a in agents) / len(agents)
     food_critical = cfg.get("economy", {}).get("food_critical", 20.0)
 
-    # Information spread (from information system)
     information_spread = 0.3
     if hasattr(society, 'information_messages') and society.information_messages:
         recent_count = 0
@@ -140,37 +136,24 @@ def _compute_trigger_context(society, agents: Sequence[Agent], cfg: dict) -> dic
                 recent_count += 1
         information_spread = min(1.0, recent_count / max(len(agents), 1))
 
-    # Persistent grievance: from crisis memory
     crisis_memory = getattr(society, "crisis_memory", None)
     persistent_grievance = crisis_memory.protest_memory if crisis_memory else 0.0
-
-    # Information cascade
     information_cascade = min(1.0, information_spread * 1.5)
 
-    # Political opportunity: based on social temperature
     temperature = compute_social_temperature(agents, society.events, cfg)
     political_opportunity = min(1.0, temperature * 1.2)
-
-    # Resource competition (from regional economics)
     resource_competition = min(1.0, (broke + starving) * 0.5)
-
-    # Price pressure
     price_pressure = min(1.0, production_gap * 0.5 + unemployment * 0.3)
 
-    # Public trust (inverse of anger)
     avg_anger = sum(a.status.get("anger", 0.0) for a in agents) / len(agents)
     public_trust = max(0.0, 1.0 - avg_anger * 2)
 
-    # Violation detection (for scandal): agents with suspicious behavior
     violation_detected = 0.0
     for a in agents:
-        # High corruption or low integrity + high influence
         if (a.status.get("corruption", 0.0) > 0.5
                 and a.resources.values.get("influence", 0) > 10):
             violation_detected = min(1.0, violation_detected + 0.01)
-    information_exposure = information_spread
 
-    # Regional inequality
     regional_inequality = 0.0
     if hasattr(society, 'regions') and society.regions:
         region_stats = []
@@ -180,10 +163,7 @@ def _compute_trigger_context(society, agents: Sequence[Agent], cfg: dict) -> dic
         if region_stats:
             regional_inequality = max(region_stats) - min(region_stats)
 
-    # Food production gap
     food_production_gap = min(1.0, max(0.0, starving - production_gap))
-
-    # Safety concern
     safety_concern = min(1.0, avg_anger + production_disruption * 0.5)
 
     return {
@@ -201,7 +181,7 @@ def _compute_trigger_context(society, agents: Sequence[Agent], cfg: dict) -> dic
         "price_pressure": price_pressure,
         "public_trust": public_trust,
         "violation_detected": violation_detected,
-        "information_exposure": information_exposure,
+        "information_exposure": information_spread,
         "regional_inequality": regional_inequality,
         "food_production_gap": food_production_gap,
         "safety_concern": safety_concern,
@@ -211,10 +191,7 @@ def _compute_trigger_context(society, agents: Sequence[Agent], cfg: dict) -> dic
 
 
 def _apply_effects(society, event: Event, agents: Sequence[Agent], rng: random.Random) -> None:
-    """事件的实际后果（v0.4.2 §19: 临时干扰而非永久 ratchet）。
-
-    v0.4.5: severity is now computed from trigger strength, not random.
-    """
+    """Event effects on society."""
     et = event.type
     sev = max(0.2, event.severity)
     if et == "natural_disaster":
@@ -242,22 +219,122 @@ def _apply_effects(society, event: Event, agents: Sequence[Agent], rng: random.R
         society.production_disruption = max(-0.2, getattr(society, "production_disruption", 0.0) - 0.1 * sev)
 
 
+def _emit_crisis_transition_events(
+    society, chain: EventChain, transitions: dict[str, CrisisTransition],
+    tick: int, context: dict,
+) -> list[Event]:
+    """v0.4.5.2: Convert CrisisTransitions into Event notifications.
+
+    Recovery notification at RECOVERING start, resolved notification at COOLDOWN.
+    """
+    new_events = []
+
+    # Map crisis type → recovery started event type
+    RECOVERY_STARTED_MAP = {
+        "economic": "economic_recovery_started",
+        "food": "food_stabilization_started",
+        "protest": "recovery_started",
+    }
+    # Map crisis type → resolved event type
+    RESOLVED_MAP = {
+        "economic": "economic_crisis_resolved",
+        "food": "food_crisis_resolved",
+        "protest": "protest_resolved",
+    }
+    # Map crisis type → original crisis event type
+    CRISIS_EVENT_MAP = {
+        "economic": "economic_crisis",
+        "food": "food_shortage",
+        "protest": "protest",
+    }
+
+    for crisis_type, trans in transitions.items():
+        if not trans.has_transition:
+            continue
+
+        # Find the original crisis event for cause_event_id
+        orig_crisis = next(
+            (e for e in reversed(chain.events)
+             if e.type == CRISIS_EVENT_MAP.get(crisis_type) and e.is_active),
+            None
+        )
+
+        # v0.4.5.2 §5: Recovery started notification
+        if trans.entered_recovering:
+            recovery_type = RECOVERY_STARTED_MAP.get(crisis_type, "recovery_started")
+            recovery_ev = chain.make(
+                tick, recovery_type,
+                severity=trans.severity * 0.5,
+                description=f"{TYPE_LABEL.get(CRISIS_EVENT_MAP.get(crisis_type, ''), crisis_type)}恢复开始",
+                cause_event_id=orig_crisis.event_id if orig_crisis else None,
+                cause_mechanism="metric_improvement",
+                evidence={
+                    "metric_value": round(trans.metric_value, 4),
+                    "previous_severity": round(trans.severity, 4),
+                    "recovery_progress": round(trans.recovery_progress, 4),
+                },
+                source_type=SOURCE_TYPE.RECOVERY,
+                trigger_score=trans.metric_value,
+                causal_confidence=0.9,
+            )
+            new_events.append(recovery_ev)
+
+        # v0.4.5.2 §7: Resolved notification
+        if trans.resolved:
+            resolved_type = RESOLVED_MAP.get(crisis_type, "protest_resolved")
+            # Find the recovery event as cause
+            recovery_ev = next(
+                (e for e in reversed(chain.events)
+                 if e.type in (RECOVERY_STARTED_MAP.get(crisis_type, ""), "recovery") and e.is_active),
+                None
+            )
+            resolved_ev = chain.make(
+                tick, resolved_type,
+                severity=0.3,
+                description=f"{TYPE_LABEL.get(CRISIS_EVENT_MAP.get(crisis_type, ''), crisis_type)}危机解决",
+                cause_event_id=recovery_ev.event_id if recovery_ev else (orig_crisis.event_id if orig_crisis else None),
+                cause_mechanism="crisis_resolution",
+                evidence={
+                    "peak_severity": round(trans.severity, 4),
+                    "recovery_progress": 1.0,
+                },
+                source_type=SOURCE_TYPE.RECOVERY,
+            )
+            new_events.append(resolved_ev)
+
+        # v0.4.5.2 §10: Recovery failed → re-entered ACTIVE/SEVERE
+        if trans.recovery_failed:
+            # Log it but don't create a separate event — the crisis is still active
+            pass
+
+    return new_events
+
+
 def _evaluate_endogenous_triggers(society, agents: Sequence[Agent], cfg: dict,
-                                   context: dict, chain: EventChain, tick: int) -> list[tuple[EventTrigger, float, TriggerEvidence]]:
-    """Evaluate all endogenous triggers and return (trigger, score, evidence) tuples."""
+                                   context: dict, chain: EventChain, tick: int,
+                                   triggers: dict[str, EventTrigger]) -> list[tuple[EventTrigger, float, TriggerEvidence]]:
+    """Evaluate endogenous triggers. Returns (trigger, score, evidence) tuples.
+
+    v0.4.5.2: Triggers are stateless — just scoring. No should_trigger().
+    """
     results = []
-    triggers = get_endogenous_triggers()
+    cm = getattr(society, "crisis_manager", None)
 
     for event_type, trigger in triggers.items():
         # Skip if already active
         if _has_active(chain, event_type):
             continue
 
-        # Compute score
+        # For crisis types managed by CrisisManager, don't re-trigger if crisis is active
+        if cm and event_type in ("economic_crisis", "food_shortage", "protest"):
+            tracker = getattr(cm, {"economic_crisis": "economic", "food_shortage": "food", "protest": "protest"}[event_type], None)
+            if tracker and tracker.state.value in ("ACTIVE", "SEVERE", "RECOVERING", "WARNING"):
+                continue
+
         score, evidence = trigger.score(society, context)
 
-        # Check if should trigger (persistence + hysteresis + cooldown)
-        if trigger.should_trigger(score, tick):
+        # For non-crisis triggers, use a simple threshold check
+        if score > trigger.trigger_threshold:
             results.append((trigger, score, evidence))
 
     return results
@@ -266,7 +343,7 @@ def _evaluate_endogenous_triggers(society, agents: Sequence[Agent], cfg: dict,
 def _evaluate_exogenous_events(society, agents: Sequence[Agent], cfg: dict,
                                 rng: random.Random, chain: EventChain, tick: int,
                                 ticks_per_day: int) -> list[Event]:
-    """v0.4.5 §13-§14: Exogenous events use daily probability, not per-tick."""
+    """Exogenous events use daily probability."""
     ev = cfg.get("events", {})
     exo_cfg = ev.get("exogenous", {})
 
@@ -274,20 +351,15 @@ def _evaluate_exogenous_events(society, agents: Sequence[Agent], cfg: dict,
         return []
 
     new_events = []
-
-    # Only check once per simulated day (at day boundary)
     if tick % ticks_per_day != 0:
         return []
 
     for event_type in ["natural_disaster", "pandemic", "external_shock"]:
         daily_prob = exo_cfg.get(event_type, {}).get("daily_probability", 0.001)
         if rng.random() < daily_prob:
-            # §15: Assign region scope
             regions = cfg.get("regions", {}).get("list", ["A", "B", "C"])
             region = rng.choice(regions) if regions else None
-
-            severity = 0.3 + rng.random() * 0.5  # Exogenous severity is partially random
-
+            severity = 0.3 + rng.random() * 0.5
             event = chain.make(
                 tick, event_type,
                 severity=severity,
@@ -304,9 +376,16 @@ def _evaluate_exogenous_events(society, agents: Sequence[Agent], cfg: dict,
 
 
 def step_events(society, cfg: dict, rng: random.Random, resolved: Optional[list] = None) -> list:
-    """v0.4.5: Detect and produce new events using causal triggers.
+    """v0.4.5.2: Event detection using CrisisManager as Single Source of Truth.
 
-    Returns new events created this tick.
+    Tick order (§15):
+    1. Compute trigger context
+    2. CrisisManager.update_all() → transitions
+    3. Convert transitions → recovery/resolved notifications
+    4. Evaluate new endogenous event candidates (non-crisis)
+    5. Evaluate exogenous events
+    6. Government response
+    7. Event budget
     """
     ev = cfg.get("events", {})
     agents = [a for a in society.agents if a.alive]
@@ -318,7 +397,12 @@ def step_events(society, cfg: dict, rng: random.Random, resolved: Optional[list]
     chain: EventChain = society.events
     new_events: list[Event] = []
 
-    # Ensure society has event queue and causal cooldown
+    # Ensure per-society trigger registry
+    if not hasattr(society, '_trigger_registry'):
+        society._trigger_registry = create_trigger_registry()
+    triggers: dict[str, EventTrigger] = society._trigger_registry
+
+    # Ensure event queue and causal cooldown
     if not hasattr(society, '_event_queue'):
         min_delay = ev.get("causal_delay", {}).get("min_ticks", 5)
         max_depth = ev.get("max_causal_depth_per_tick", 2)
@@ -329,12 +413,11 @@ def step_events(society, cfg: dict, rng: random.Random, resolved: Optional[list]
     queue: EventQueue = society._event_queue
     causal_cd: CausalCooldown = society._causal_cooldown
 
-    # Clean up old causal memory periodically
     if tick % 100 == 0:
         queue.cleanup_causal_memory(tick)
         causal_cd.cleanup(tick)
 
-    # --- Process deferred events from queue ---
+    # Process deferred events from queue
     ready_events = queue.dequeue(tick)
     for event_data in ready_events:
         event_type = event_data.get("type", "unknown")
@@ -355,144 +438,54 @@ def step_events(society, cfg: dict, rng: random.Random, resolved: Optional[list]
         new_events.append(event)
         _apply_effects(society, event, agents, rng)
 
-    # --- Compute trigger context (once, shared by all triggers) ---
+    # Compute trigger context
     context = _compute_trigger_context(society, agents, cfg)
 
-    # --- Handle crisis state machine for food (existing logic with v0.4.5 structure) ---
+    # v0.4.5.2 §15: CrisisManager.update_all() — unified crisis state update
     cm = getattr(society, "crisis_manager", None)
     if cm is not None:
-        # Food crisis state machine
         starving_ratio = context.get("starving", 0.0)
-        previous_food_state = cm.food.state
-        cm.food.update(starving_ratio, tick, ticks_per_day)
+        economic_pressure = _economic_pressure(agents, context)
+        protest_ratio = _protest_ratio(agents)
 
-        # Recovery notification: only when tracker reaches COOLDOWN
-        if (previous_food_state.name == "RECOVERING"
-                and cm.food.state.name == "COOLDOWN"
-                and not _has_recent(chain, "food_stabilization", tick, int(2 * ticks_per_day))):
-            cause = next((e for e in reversed(chain.events)
-                          if e.type in ("food_shortage", "economic_crisis")), None)
-            new_events.append(chain.make(
-                tick, "food_stabilization", severity=0.4,
-                description="粮食供给重新企稳",
-                cause_event_id=cause.event_id if cause else None,
-                cause_mechanism="crisis_state_machine_recovery",
-                duration=DURATION["food_stabilization"],
-                source_type=SOURCE_TYPE.RECOVERY,
-                intensity=0.4))
+        transitions = cm.update_all(
+            hunger_ratio=starving_ratio,
+            protest_ratio=protest_ratio,
+            economic_pressure=economic_pressure,
+            tick=tick,
+            ticks_per_day=ticks_per_day,
+        )
 
-        # Food shortage event: only when crisis state becomes ACTIVE for first tick
-        if cm.food.state.value == "ACTIVE" and cm.food.duration_ticks == 1:
-            food_trigger = get_trigger("food_shortage")
-            score, evidence = food_trigger.score(society, context) if food_trigger else (starving_ratio, TriggerEvidence())
-            new_events.append(chain.make(
-                tick, "food_shortage",
-                severity=min(1.0, starving_ratio),
-                description=f"粮食短缺：{sum(1 for a in agents if a.resources.is_starving())}/{len(agents)} 名成员处于饥饿状态",
-                effects={"starving_ratio": round(starving_ratio, 3)},
-                duration=DURATION["food_shortage"],
-                trigger_score=score,
-                causal_confidence=evidence.confidence,
-                evidence=evidence.indicators,
-                cause_mechanism="food_stock_depletion",
-            ))
+        # v0.4.5.2 §5/§7: Convert transitions → event notifications
+        crisis_events = _emit_crisis_transition_events(society, chain, transitions, tick, context)
+        new_events.extend(crisis_events)
 
-    # --- Economic crisis: use trigger registry ---
-    economic_trigger = get_trigger("economic_crisis")
-    if economic_trigger:
-        eco_score, eco_evidence = economic_trigger.score(society, context)
-        if cm is not None:
-            # Update crisis state machine
-            cm.economic.update(eco_score, tick, ticks_per_day)
+        # Apply effects for new ACTIVE/SEVERE crises
+        for crisis_type, trans in transitions.items():
+            if trans.entered_active or trans.entered_severe:
+                crisis_event_type = {"economic": "economic_crisis", "food": "food_shortage", "protest": "protest"}[crisis_type]
+                if not _has_active(chain, crisis_event_type):
+                    severity = max(0.2, trans.metric_value)
+                    crisis_ev = chain.make(
+                        tick, crisis_event_type,
+                        severity=severity,
+                        description=TYPE_LABEL.get(crisis_event_type, crisis_event_type),
+                        duration=DURATION.get(crisis_event_type, 40),
+                        trigger_score=trans.metric_value,
+                        causal_confidence=0.9,
+                        evidence={"metric_value": round(trans.metric_value, 4)},
+                        cause_mechanism="crisis_state_machine",
+                    )
+                    new_events.append(crisis_ev)
+                    _apply_effects(society, crisis_ev, agents, rng)
 
-            if (cm.economic.state.value == "ACTIVE"
-                    and cm.economic.duration_ticks == 1
-                    and not _has_active(chain, "economic_crisis")):
-                crisis = chain.make(
-                    tick, "economic_crisis",
-                    severity=max(0.2, eco_score),
-                    description="经济压力引发的经济危机",
-                    duration=DURATION["economic_crisis"],
-                    trigger_score=eco_score,
-                    causal_confidence=eco_evidence.confidence,
-                    evidence=eco_evidence.indicators,
-                    cause_mechanism="economic_pressure_accumulation",
-                )
-                new_events.append(crisis)
-                _apply_effects(society, crisis, agents, rng)
-        elif economic_trigger.should_trigger(eco_score, tick):
-            # Fallback without CrisisManager
-            crisis = chain.make(
-                tick, "economic_crisis",
-                severity=max(0.2, eco_score),
-                description="经济压力引发的经济危机",
-                duration=DURATION["economic_crisis"],
-                trigger_score=eco_score,
-                causal_confidence=eco_evidence.confidence,
-                evidence=eco_evidence.indicators,
-                cause_mechanism="economic_pressure_accumulation",
-            )
-            new_events.append(crisis)
-            _apply_effects(society, crisis, agents, rng)
-
-    # --- Protest: use trigger registry ---
-    protest_trigger = get_trigger("protest")
-    if protest_trigger:
-        prot_score, prot_evidence = protest_trigger.score(society, context)
-        if cm is not None:
-            previous_protest_state = cm.protest.state
-            cm.protest.update(prot_score, tick, ticks_per_day)
-
-            if cm.protest.state.value == "ACTIVE" and cm.protest.duration_ticks == 1:
-                new_events.append(chain.make(
-                    tick, "protest",
-                    severity=context.get("temperature", 0.5),
-                    description="不满情绪上升引发公众抗议",
-                    duration=rng.randint(10, 30),
-                    trigger_score=prot_score,
-                    causal_confidence=prot_evidence.confidence,
-                    evidence=prot_evidence.indicators,
-                    cause_mechanism="grievance_mobilization",
-                ))
-                society.production_disruption = min(0.4, getattr(society, "production_disruption", 0.0) + 0.08)
-
-            # Recovery notification
-            if (previous_protest_state.name == "RECOVERING"
-                    and cm.protest.state.name == "COOLDOWN"
-                    and not _has_recent(chain, "recovery", tick, int(2 * ticks_per_day))):
-                cause = next((e for e in reversed(chain.events) if e.type == "protest"), None)
-                new_events.append(chain.make(
-                    tick, "recovery", severity=0.4,
-                    description="抗议平息，生产逐步恢复",
-                    cause_event_id=cause.event_id if cause else None,
-                    cause_mechanism="protest_resolution",
-                    duration=DURATION["recovery"],
-                    source_type=SOURCE_TYPE.RECOVERY,
-                    intensity=0.4))
-        elif protest_trigger.should_trigger(prot_score, tick):
-            new_events.append(chain.make(
-                tick, "protest",
-                severity=context.get("temperature", 0.5),
-                description="不满情绪上升引发公众抗议",
-                duration=rng.randint(10, 30),
-                trigger_score=prot_score,
-                causal_confidence=prot_evidence.confidence,
-                evidence=prot_evidence.indicators,
-                cause_mechanism="grievance_mobilization",
-            ))
-            society.production_disruption = min(0.4, getattr(society, "production_disruption", 0.0) + 0.08)
-
-    # --- Other endogenous triggers ---
-    # Political movement, scandal, resource boom, unemployment, conflict, etc.
-    endogenous_results = _evaluate_endogenous_triggers(society, agents, cfg, context, chain, tick)
+    # Evaluate non-crisis endogenous triggers
+    endogenous_results = _evaluate_endogenous_triggers(society, agents, cfg, context, chain, tick, triggers)
     for trigger, score, evidence in endogenous_results:
-        # Skip if already handled above
         if trigger.event_type in ("economic_crisis", "food_shortage", "protest"):
-            continue
+            continue  # Already handled by CrisisManager
 
-        # Compute severity from trigger score + small noise
         severity = max(0.2, min(1.0, score + rng.gauss(0, 0.05)))
-
         event = chain.make(
             tick, trigger.event_type,
             severity=severity,
@@ -501,20 +494,20 @@ def step_events(society, cfg: dict, rng: random.Random, resolved: Optional[list]
             trigger_score=score,
             causal_confidence=evidence.confidence,
             evidence=evidence.indicators,
-            cause_mechanism=f"trigger_registry_{trigger.event_type}",
+            cause_mechanism=f"trigger_{trigger.event_type}",
             scope=EVENT_SCOPE.GROUP if trigger.event_type in ("conflict", "group_split") else EVENT_SCOPE.REGIONAL,
         )
         new_events.append(event)
         _apply_effects(society, event, agents, rng)
 
-    # --- Exogenous events (daily probability) ---
+    # Exogenous events
     exo_events = _evaluate_exogenous_events(society, agents, cfg, rng, chain, tick, ticks_per_day)
     new_events.extend(exo_events)
 
-    # --- Government response to new events ---
+    # Government response (not for recovery events)
     for e in new_events:
         if e.source_type == SOURCE_TYPE.RECOVERY:
-            continue  # §26: recovery does not trigger government response
+            continue
         if e.type in ("protest", "economic_crisis", "food_shortage"):
             if rng.random() < 0.6:
                 chain.make(
@@ -529,24 +522,38 @@ def step_events(society, cfg: dict, rng: random.Random, resolved: Optional[list]
                     evidence={"trigger_event_severity": e.severity},
                 )
 
-    # --- Event budget (§19): limit major events per day ---
+    # Event budget
     daily_budget = ev.get("daily_major_event_budget", 2)
-    endogenous_today = [
-        e for e in new_events
-        if e.source_type == SOURCE_TYPE.ENDOGENOUS and e.severity > 0.5
-    ]
+    endogenous_today = [e for e in new_events if e.source_type == SOURCE_TYPE.ENDOGENOUS and e.severity > 0.5]
     if len(endogenous_today) > daily_budget:
-        # Keep top N by trigger_score, defer rest
         endogenous_today.sort(key=lambda e: e.trigger_score, reverse=True)
         for excess in endogenous_today[daily_budget:]:
-            # Remove from chain and defer to queue
             if excess in chain.events:
                 chain.events.remove(excess)
             queue.enqueue(
                 excess.as_dict(),
-                tick=tick + ticks_per_day,  # defer to next day
+                tick=tick + ticks_per_day,
                 source_type=SOURCE_TYPE.ENDOGENOUS,
                 cause_event_type=excess.type,
             )
 
     return new_events
+
+
+def _economic_pressure(agents: Sequence[Agent], context: dict) -> float:
+    """Compute economic pressure from context."""
+    return min(1.0, (
+        0.30 * context.get("production_gap", 0)
+        + 0.25 * context.get("unemployment", 0)
+        + 0.20 * context.get("price_pressure", 0)
+        + 0.15 * context.get("broke", 0)
+        + 0.10 * context.get("starving", 0)
+    ))
+
+
+def _protest_ratio(agents: Sequence[Agent]) -> float:
+    """Compute protest ratio from agent anger."""
+    if not agents:
+        return 0.0
+    angry = sum(1 for a in agents if a.status.get("anger", 0.0) > 0.3)
+    return angry / len(agents)

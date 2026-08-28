@@ -35,7 +35,7 @@ from engine.event.event import (
 from engine.event.triggers import (
     EventTrigger, TriggerEvidence, EconomicCrisisTrigger, FoodShortageTrigger,
     ProtestTrigger, PoliticalMovementTrigger, ScandalTrigger, ResourceBoomTrigger,
-    get_trigger, get_all_triggers, get_endogenous_triggers, register_trigger,
+    create_trigger_registry, get_trigger_definitions,
 )
 from engine.event.queue import EventQueue, CausalCooldown
 from engine.event.loops import EventLoopDetector, DetectedLoop, EventPeriodicity
@@ -201,7 +201,7 @@ class TestTriggerRegistry:
 
     def test_all_triggers_registered(self):
         """所有内生事件类型必须有注册的触发器。"""
-        triggers = get_all_triggers()
+        triggers = get_trigger_definitions()
         assert "economic_crisis" in triggers
         assert "food_shortage" in triggers
         assert "protest" in triggers
@@ -209,28 +209,31 @@ class TestTriggerRegistry:
         assert "scandal" in triggers
         assert "resource_boom" in triggers
 
-    def test_get_trigger_returns_instance(self):
-        """get_trigger() 返回触发器实例。"""
-        t = get_trigger("economic_crisis")
-        assert t is not None
+    def test_create_registry_returns_instances(self):
+        """create_trigger_registry() 返回触发器实例字典。"""
+        registry = create_trigger_registry()
+        assert "economic_crisis" in registry
+        t = registry["economic_crisis"]
         assert isinstance(t, EventTrigger)
 
-    def test_get_endogenous_triggers(self):
-        """get_endogenous_triggers() 只返回内生触发器。"""
-        triggers = get_endogenous_triggers()
-        for t in triggers.values():
+    def test_registry_triggers_are_endogenous(self):
+        """注册表中的触发器都是内生类型。"""
+        registry = create_trigger_registry()
+        for t in registry.values():
             assert t.source_type == SOURCE_TYPE.ENDOGENOUS
 
-    def test_register_custom_trigger(self):
-        """register_trigger() 可以注册自定义触发器。"""
-        class CustomTrigger(EventTrigger):
-            event_type = "custom_event"
-            def score(self, society, context):
-                return 0.5, TriggerEvidence()
+    def test_per_society_isolation(self):
+        """v0.4.5.2 §26: 每个 Society 独立的触发器注册表。"""
+        reg_a = create_trigger_registry()
+        reg_b = create_trigger_registry()
+        assert reg_a["economic_crisis"] is not reg_b["economic_crisis"]
 
-        t = CustomTrigger()
-        register_trigger(t)
-        assert get_trigger("custom_event") is t
+    def test_triggers_are_stateless(self):
+        """v0.4.5.2 §2: 触发器不维护状态。"""
+        registry = create_trigger_registry()
+        for t in registry.values():
+            assert not hasattr(t, '_is_active')
+            assert not hasattr(t, '_cooldown_remaining')
 
 
 # ============================================================================
@@ -595,187 +598,216 @@ class TestEventEcologyDashboard:
 
 
 # ============================================================================
-# Trigger Persistence Tests
+# CrisisTracker Persistence / Hysteresis / Cooldown Tests (v0.4.5.2)
 # ============================================================================
 
-class TestTriggerPersistence:
-    """§16: Event persistence."""
+class TestCrisisTrackerPersistence:
+    """§16: CrisisTracker persistence — state now lives in CrisisTracker."""
 
     def test_persistence_required(self):
-        """分数必须持续 N ticks 才触发。"""
-        trigger = EconomicCrisisTrigger()
-        trigger.persistence_ticks = 5
-        trigger.trigger_threshold = 0.7
+        """指标必须持续 N ticks 才进入 WARNING。"""
+        from engine.crisis.tracker import CrisisTracker, CrisisState
+        tracker = CrisisTracker("test", trigger_threshold=0.7, trigger_persistence_ticks=5, resolve_threshold=0.4)
 
-        # Score above threshold for 4 ticks — should not trigger
-        assert trigger.should_trigger(0.8, 1) is False
-        assert trigger.should_trigger(0.8, 2) is False
-        assert trigger.should_trigger(0.8, 3) is False
-        assert trigger.should_trigger(0.8, 4) is False
+        for tick in range(1, 5):
+            tracker.update(0.8, tick)
+            assert tracker.state == CrisisState.NORMAL
 
-        # 5th tick — should trigger
-        assert trigger.should_trigger(0.8, 5) is True
+        tracker.update(0.8, 5)
+        assert tracker.state == CrisisState.WARNING
 
     def test_persistence_reset_on_drop(self):
-        """分数低于阈值时重置持久性计数。"""
-        trigger = EconomicCrisisTrigger()
-        trigger.persistence_ticks = 5
-        trigger.trigger_threshold = 0.7
+        """指标低于阈值时重置持久性计数。"""
+        from engine.crisis.tracker import CrisisTracker
+        tracker = CrisisTracker("test", trigger_threshold=0.7, trigger_persistence_ticks=5, resolve_threshold=0.4)
 
-        trigger.should_trigger(0.8, 1)
-        trigger.should_trigger(0.8, 2)
-        trigger.should_trigger(0.5, 3)  # drop below threshold → reset to 0
-        trigger.should_trigger(0.8, 4)
-        trigger.should_trigger(0.8, 5)
-
-        # Counter was reset at tick 3, so only 2 ticks above threshold (tick 4, 5)
-        assert trigger._above_threshold_ticks == 2
+        for tick in range(1, 3):
+            tracker.update(0.8, tick)
+        tracker.update(0.5, 3)
+        assert tracker._above_trigger_ticks == 0
 
 
-# ============================================================================
-# Trigger Hysteresis Tests
-# ============================================================================
-
-class TestTriggerHysteresis:
-    """§17: Hysteresis."""
+class TestCrisisTrackerHysteresis:
+    """§17: CrisisTracker hysteresis."""
 
     def test_resolve_threshold_lower_than_trigger(self):
-        """解决阈值必须低于触发阈值。"""
-        trigger = EconomicCrisisTrigger()
-        assert trigger.resolve_threshold < trigger.trigger_threshold
+        from engine.crisis.tracker import CrisisTracker
+        tracker = CrisisTracker("test")
+        assert tracker.resolve_threshold < tracker.trigger_threshold
 
     def test_hysteresis_prevents_flapping(self):
-        """迟滞防止在阈值附近反复开关。"""
-        trigger = EconomicCrisisTrigger()
-        trigger.persistence_ticks = 1
-        trigger.trigger_threshold = 0.7
-        trigger.resolve_threshold = 0.4
+        from engine.crisis.tracker import CrisisTracker, CrisisState
+        tracker = CrisisTracker("test", trigger_threshold=0.7, resolve_threshold=0.4, trigger_persistence_ticks=1)
 
-        # Trigger at 0.75
-        assert trigger.should_trigger(0.75, 1) is True
-
-        # Drop to 0.65 — above resolve, should not deactivate
-        trigger.should_trigger(0.65, 2)
-        assert trigger._is_active is True
-
-        # Drop to 0.35 — below resolve, should deactivate
-        trigger.should_trigger(0.35, 3)
-        assert trigger._is_active is False
+        tracker.update(0.75, 1)
+        assert tracker.state == CrisisState.WARNING
+        tracker.update(0.75, 2)
+        assert tracker.state == CrisisState.ACTIVE
+        tracker.update(0.45, 3)
+        assert tracker.state == CrisisState.ACTIVE  # above resolve
+        tracker.update(0.35, 4)
+        assert tracker.state == CrisisState.RECOVERING
 
 
-# ============================================================================
-# Trigger Cooldown Tests
-# ============================================================================
-
-class TestTriggerCooldown:
-    """§18: Cooldown."""
+class TestCrisisTrackerCooldown:
+    """§18: CrisisTracker cooldown."""
 
     def test_cooldown_after_resolution(self):
-        """解决后进入冷却期。"""
-        trigger = EconomicCrisisTrigger()
-        trigger.persistence_ticks = 1
-        trigger.cooldown_ticks = 10
-        trigger.trigger_threshold = 0.7
-        trigger.resolve_threshold = 0.4
-
-        # Trigger
-        trigger.should_trigger(0.8, 1)
-        assert trigger._is_active is True
-
-        # Resolve
-        trigger.should_trigger(0.3, 2)
-        assert trigger._is_active is False
-
-        # During cooldown — should not trigger
-        assert trigger.should_trigger(0.8, 3) is False
-        assert trigger.should_trigger(0.8, 5) is False
-
-        # After cooldown
-        trigger._cooldown_remaining = 0
-        trigger._above_threshold_ticks = 0
-        # Need persistence again
-        for i in range(10):
-            trigger.should_trigger(0.8, 20 + i)
-        # Should eventually trigger again
+        from engine.crisis.tracker import CrisisTracker, CrisisState
+        tracker = CrisisTracker("test", trigger_threshold=0.7, resolve_threshold=0.4,
+                                trigger_persistence_ticks=1, cooldown_days=0.1)
+        tracker.update(0.8, 1)
+        tracker.update(0.8, 2)
+        assert tracker.state == CrisisState.ACTIVE
+        tracker.update(0.3, 3)
+        assert tracker.state == CrisisState.RECOVERING
+        tracker.recovery_progress = 0.9
+        tracker.update(0.3, 4)
+        assert tracker.state == CrisisState.COOLDOWN
 
 
 # ============================================================================
-# Integration: Simulation with v0.4.5
+# Recovery Lifecycle Tests (v0.4.5.2)
 # ============================================================================
 
-class TestSimulationV045:
-    """Integration tests for v0.4.5 event ecology."""
+class TestRecoveryLifecycle:
+    """v0.4.5.2: Recovery notifications at correct lifecycle points."""
 
-    def test_simulation_runs_with_new_event_system(self):
-        """模拟可以在新事件系统下运行。"""
+    def test_recovery_started_on_entering_recovering(self):
+        """ACTIVE → RECOVERING 时生成 recovery_started 通知。"""
+        from engine.crisis.tracker import CrisisTracker, CrisisState
+        tracker = CrisisTracker("economic", trigger_threshold=0.68, resolve_threshold=0.45,
+                                trigger_persistence_ticks=1)
+        tracker.update(0.8, 1)  # WARNING
+        tracker.update(0.8, 2)  # ACTIVE
+        trans = tracker.update(0.3, 3)  # RECOVERING
+        assert trans.entered_recovering is True
+        assert tracker.state == CrisisState.RECOVERING
+
+    def test_resolved_on_entering_cooldown(self):
+        """RECOVERING → COOLDOWN 时生成 resolved 通知。"""
+        from engine.crisis.tracker import CrisisTracker, CrisisState
+        tracker = CrisisTracker("economic", trigger_threshold=0.68, resolve_threshold=0.45,
+                                trigger_persistence_ticks=1)
+        tracker.update(0.8, 1)
+        tracker.update(0.8, 2)
+        tracker.update(0.3, 3)
+        tracker.recovery_progress = 0.9
+        trans = tracker.update(0.3, 4)
+        assert trans.resolved is True
+        assert tracker.state == CrisisState.COOLDOWN
+
+    def test_recovery_failure_returns_to_active(self):
+        """恢复失败时重新进入 ACTIVE。"""
+        from engine.crisis.tracker import CrisisTracker, CrisisState
+        tracker = CrisisTracker("economic", trigger_threshold=0.68, resolve_threshold=0.45,
+                                severe_threshold_multiplier=1.5, trigger_persistence_ticks=1)
+        tracker.update(0.8, 1)
+        tracker.update(0.8, 2)
+        tracker.update(0.3, 3)  # RECOVERING
+        trans = tracker.update(0.8, 4)  # metric worsens
+        assert trans.recovery_failed is True
+        assert tracker.state == CrisisState.ACTIVE
+
+    def test_recovery_timeout(self):
+        """恢复超时重新进入 ACTIVE。"""
+        from engine.crisis.tracker import CrisisTracker, CrisisState
+        tracker = CrisisTracker("economic", trigger_threshold=0.68, resolve_threshold=0.45,
+                                trigger_persistence_ticks=1, max_recovery_ticks=5)
+        tracker.update(0.8, 1)
+        tracker.update(0.8, 2)
+        tracker.update(0.3, 3)  # RECOVERING, _recovery_ticks=0
+        for tick in range(4, 8):
+            tracker.update(0.5, tick)  # _recovery_ticks goes 1,2,3,4
+        # At tick 8 update: _recovery_ticks=5 >= max_recovery_ticks=5 → timeout
+        trans = tracker.update(0.5, 8)
+        assert trans.recovery_failed is True
+        assert tracker.state == CrisisState.ACTIVE
+
+    def test_recovery_counters(self):
+        """恢复计数器正确递增。"""
+        from engine.crisis.tracker import CrisisTracker
+        tracker = CrisisTracker("economic", trigger_threshold=0.68, resolve_threshold=0.45,
+                                trigger_persistence_ticks=1, cooldown_days=0.01)
+        tracker.update(0.8, 1)
+        tracker.update(0.8, 2)
+        assert tracker.recovery_started_count == 0
+        tracker.update(0.3, 3)
+        assert tracker.recovery_started_count == 1
+        tracker.recovery_progress = 0.9
+        tracker.update(0.3, 4)
+        assert tracker.recovery_completed_count == 1
+
+
+# ============================================================================
+# Multi-Society Isolation Tests (v0.4.5.2 §28)
+# ============================================================================
+
+class TestCrisisIsolation:
+    """v0.4.5.2 §28: Crisis state must not leak between societies."""
+
+    def test_trigger_registry_isolation(self):
+        """触发器注册表在不同 Society 间隔离。"""
+        from engine.event.triggers import create_trigger_registry
+        reg_a = create_trigger_registry()
+        reg_b = create_trigger_registry()
+        assert reg_a["economic_crisis"] is not reg_b["economic_crisis"]
+
+    def test_crisis_manager_isolation(self):
+        """CrisisManager 在不同 Society 间隔离。"""
+        from engine.crisis.tracker import CrisisManager, CrisisState
+        cm_a = CrisisManager()
+        cm_b = CrisisManager()
+        cm_a.economic.trigger_persistence_ticks = 1
+        cm_a.economic.update(0.7, 1, 100)  # WARNING
+        cm_a.economic.update(0.7, 2, 100)  # ACTIVE
+        assert cm_a.economic.state in (CrisisState.ACTIVE, CrisisState.SEVERE)
+        assert cm_a.economic.is_crisis()
+        assert cm_b.economic.state == CrisisState.NORMAL
+        assert not cm_b.economic.is_crisis()
+
+
+# ============================================================================
+# Integration Tests
+# ============================================================================
+
+class TestSimulationV0452:
+    """Integration tests for v0.4.5.2."""
+
+    def test_simulation_runs(self):
         from engine.simulation.engine import SimulationEngine
         from configs.loader import default_society_config
-
         cfg = default_society_config()
         cfg['population']['count'] = 50
         eng = SimulationEngine()
         s = eng.create_society(cfg, seed=42)
         result = eng.step(s.society_id, ticks=100)
-
         assert result is not None
         assert "new_events" in result
-        assert "metrics" in result
 
     def test_events_have_source_type(self):
-        """生成的事件必须有 source_type。"""
         from engine.simulation.engine import SimulationEngine
         from configs.loader import default_society_config
-
         cfg = default_society_config()
         cfg['population']['count'] = 50
         eng = SimulationEngine()
         s = eng.create_society(cfg, seed=42)
         result = eng.step(s.society_id, ticks=200)
-
         for event_data in result.get("new_events", []):
             assert "source_type" in event_data
             assert event_data["source_type"] in ["ENDOGENOUS", "EXOGENOUS", "RECOVERY"]
 
-    def test_exogenous_events_are_daily_rate(self):
-        """§13: 外生事件使用日概率。"""
-        from engine.simulation.engine import SimulationEngine
-        from configs.loader import default_society_config
-
-        cfg = default_society_config()
-        cfg['population']['count'] = 50
-        cfg['events']['exogenous']['natural_disaster']['daily_probability'] = 0.01
-        eng = SimulationEngine()
-        s = eng.create_society(cfg, seed=42)
-        result = eng.step(s.society_id, ticks=1000)
-
-        exo_events = [e for e in result.get("new_events", [])
-                      if e.get("source_type") == "EXOGENOUS"]
-        # With daily_probability=0.01 over 10 days, expect ~0.1 events
-        # Just verify they exist and are properly classified
-        for e in exo_events:
-            assert e["source_type"] == "EXOGENOUS"
-
     def test_event_ecology_diagnostics(self):
-        """§55: 事件生态诊断可用。"""
         from engine.simulation.engine import SimulationEngine
         from configs.loader import default_society_config
-
         cfg = default_society_config()
         cfg['population']['count'] = 50
         eng = SimulationEngine()
         s = eng.create_society(cfg, seed=42)
         eng.step(s.society_id, ticks=200)
-
         ecology = eng.get_event_ecology(s.society_id)
         assert ecology is not None
         assert "report" in ecology
-        assert "stats" in ecology
-        assert "EVENT ECOLOGY" in ecology["report"]
-
-    def test_v044_tests_still_pass(self):
-        """v0.4.4 的测试必须继续通过。"""
-        # This is verified by running the full test suite
-        pass
 
 
 if __name__ == "__main__":

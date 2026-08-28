@@ -164,11 +164,16 @@ class RunLoop:
         except Exception as e:
             logger.warning(f"[RunLoop] JSON serialization error: {e}")
             return
+        stale = []
         for ws in subs:
             try:
-                await ws.send_text(payload)
-            except Exception:
-                pass
+                # 1-second timeout — if browser tab is throttled, don't block the loop
+                await asyncio.wait_for(ws.send_text(payload), timeout=1.0)
+            except (asyncio.TimeoutError, Exception):
+                stale.append(ws)
+        # Clean up dead connections
+        for ws in stale:
+            clients.pop(ws, None)
 
     def start(self, society_id: str, speed: float) -> None:
         self.speed[society_id] = speed

@@ -156,17 +156,41 @@
   }
 
   // ---- WebSocket --------------------------------------------------------
+  let wsReconnectTimer = null;
+
   function connectWS(societyId) {
-    if (state.ws) state.ws.close();
+    if (state.ws) { try { state.ws.close(); } catch(e) {} }
+    if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(`${proto}://${location.host}/ws/simulation/${societyId}`);
     state.ws = ws;
+    ws.onopen = () => { setStatus('running'); };
     ws.onmessage = (ev) => {
-      const msg = JSON.parse(ev.data);
-      handleWS(msg);
+      try { handleWS(JSON.parse(ev.data)); } catch(e) { /* ignore parse errors */ }
     };
-    ws.onclose = () => { setStatus('paused'); };
+    ws.onclose = () => {
+      // Auto-reconnect after 2 seconds (handles tab switching, network blips)
+      if (state.societyId) {
+        wsReconnectTimer = setTimeout(() => { connectWS(state.societyId); }, 2000);
+      }
+    };
+    ws.onerror = () => { /* onclose will fire next */ };
   }
+
+  // Reconnect WebSocket when tab becomes visible again (browser throttles background tabs)
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && state.societyId) {
+      const ws = state.ws;
+      // If connection is dead or stale, reconnect immediately
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+        connectWS(state.societyId);
+      }
+      // Refresh data on return
+      refreshAgentPositions();
+      loadMetrics();
+    }
+  });
 
   function handleWS(msg) {
     if (msg.type === 'tick' && msg.clock) {

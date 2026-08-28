@@ -157,10 +157,16 @@
 
   // ---- WebSocket --------------------------------------------------------
   let wsReconnectTimer = null;
+  let wsIntentionalClose = false;
 
   function connectWS(societyId) {
-    if (state.ws) { try { state.ws.close(); } catch(e) {} }
     if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+    // Close existing socket without triggering reconnect
+    if (state.ws) {
+      wsIntentionalClose = true;
+      try { state.ws.close(); } catch(e) {}
+      wsIntentionalClose = false;
+    }
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(`${proto}://${location.host}/ws/simulation/${societyId}`);
     state.ws = ws;
@@ -169,8 +175,8 @@
       try { handleWS(JSON.parse(ev.data)); } catch(e) { /* ignore parse errors */ }
     };
     ws.onclose = () => {
-      // Auto-reconnect after 2 seconds (handles tab switching, network blips)
-      if (state.societyId) {
+      // Only auto-reconnect on unexpected disconnects (not intentional closes)
+      if (!wsIntentionalClose && state.societyId) {
         wsReconnectTimer = setTimeout(() => { connectWS(state.societyId); }, 2000);
       }
     };

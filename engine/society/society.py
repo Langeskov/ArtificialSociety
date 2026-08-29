@@ -28,6 +28,7 @@ from ..economy.region import RegionRegistry
 from ..crisis.tracker import CrisisManager
 from ..crisis.memory import CrisisMemory
 from ..crisis.diagnostics import OscillationDetector, FeedbackDiagnostics
+from ..dynamics.equilibrium import DynamicEquilibriumMonitor
 from ..economy.population import DEFAULT_STRUCTURE, normalize_structure, PopulationSnapshot, assign_sector, compute_skills
 from ..economy.labor import LaborMarket, create_initial_jobs
 from ..economy.production_unit import ProductionUnit, create_initial_units, assign_workers_to_units
@@ -67,7 +68,8 @@ class Society:
     crisis_memory: CrisisMemory = field(default_factory=CrisisMemory)
     oscillation_detector: OscillationDetector = field(default_factory=OscillationDetector)
     feedback_diagnostics: FeedbackDiagnostics = field(default_factory=FeedbackDiagnostics)
-    production_disruption: float = 0.0  # v0.4.2 §19: 临时干扰（非永久 ratchet）
+    production_disruption: float = 0.0
+    equilibrium_monitor: object = None  # v0.4.5.3: DynamicEquilibriumMonitor  # v0.4.2 §19: 临时干扰（非永久 ratchet）
     resource_flow: dict = field(default_factory=lambda: {
         "food_produced": 0.0, "food_consumed": 0.0,
         "food_traded_in": 0.0, "food_traded_out": 0.0,
@@ -106,6 +108,9 @@ class Society:
         # v0.4.4: crisis thresholds/cooldowns are config-driven, including
         # economic_crisis (which previously had no stateful cooldown).
         self.crisis_manager.configure(self.config)
+
+        # v0.4.5.3: Dynamic equilibrium monitor
+        self.equilibrium_monitor = DynamicEquilibriumMonitor()
 
         # Collapse detector configured from the stability section (§26).
         stab = self.config.get("stability", {})

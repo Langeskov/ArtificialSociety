@@ -223,43 +223,47 @@ def _emit_crisis_transition_events(
     society, chain: EventChain, transitions: dict[str, CrisisTransition],
     tick: int, context: dict,
 ) -> list[Event]:
-    """v0.4.5.2: Convert CrisisTransitions into Event notifications.
+    """v0.4.5.3: Convert CrisisTransitions into Event notifications.
 
+    All notifications carry crisis_instance_id for causal chain integrity.
     Recovery notification at RECOVERING start, resolved notification at COOLDOWN.
     """
     new_events = []
 
-    # Map crisis type → recovery started event type
     RECOVERY_STARTED_MAP = {
         "economic": "economic_recovery_started",
         "food": "food_stabilization_started",
         "protest": "recovery_started",
     }
-    # Map crisis type → resolved event type
     RESOLVED_MAP = {
         "economic": "economic_crisis_resolved",
         "food": "food_crisis_resolved",
         "protest": "protest_resolved",
     }
-    # Map crisis type → original crisis event type
     CRISIS_EVENT_MAP = {
         "economic": "economic_crisis",
         "food": "food_shortage",
         "protest": "protest",
     }
 
+    def find_crisis_event(ct: str, iid: str):
+        """v0.4.5.3: Find crisis event by instance_id (not is_active)."""
+        type_name = CRISIS_EVENT_MAP.get(ct, "")
+        for e in reversed(chain.events):
+            if e.type == type_name and e.effects.get("crisis_instance_id", "") == iid:
+                return e
+        for e in reversed(chain.events):
+            if e.type == type_name:
+                return e
+        return None
+
     for crisis_type, trans in transitions.items():
         if not trans.has_transition:
             continue
 
-        # Find the original crisis event for cause_event_id
-        orig_crisis = next(
-            (e for e in reversed(chain.events)
-             if e.type == CRISIS_EVENT_MAP.get(crisis_type) and e.is_active),
-            None
-        )
+        iid = trans.crisis_instance_id
+        orig_crisis = find_crisis_event(crisis_type, iid)
 
-        # v0.4.5.2 §5: Recovery started notification
         if trans.entered_recovering:
             recovery_type = RECOVERY_STARTED_MAP.get(crisis_type, "recovery_started")
             recovery_ev = chain.make(
@@ -269,8 +273,10 @@ def _emit_crisis_transition_events(
                 cause_event_id=orig_crisis.event_id if orig_crisis else None,
                 cause_mechanism="metric_improvement",
                 evidence={
+                    "crisis_instance_id": iid,
                     "metric_value": round(trans.metric_value, 4),
-                    "previous_severity": round(trans.severity, 4),
+                    "peak_metric": round(trans.peak_metric, 4),
+                    "baseline_metric": round(trans.baseline_metric, 4),
                     "recovery_progress": round(trans.recovery_progress, 4),
                 },
                 source_type=SOURCE_TYPE.RECOVERY,
@@ -279,14 +285,13 @@ def _emit_crisis_transition_events(
             )
             new_events.append(recovery_ev)
 
-        # v0.4.5.2 §7: Resolved notification
         if trans.resolved:
             resolved_type = RESOLVED_MAP.get(crisis_type, "protest_resolved")
-            # Find the recovery event as cause
             recovery_ev = next(
                 (e for e in reversed(chain.events)
-                 if e.type in (RECOVERY_STARTED_MAP.get(crisis_type, ""), "recovery") and e.is_active),
-                None
+                 if e.type in (RECOVERY_STARTED_MAP.get(crisis_type, ""), "recovery")
+                 and e.effects.get("crisis_instance_id", "") == iid),
+                None,
             )
             resolved_ev = chain.make(
                 tick, resolved_type,
@@ -295,19 +300,18 @@ def _emit_crisis_transition_events(
                 cause_event_id=recovery_ev.event_id if recovery_ev else (orig_crisis.event_id if orig_crisis else None),
                 cause_mechanism="crisis_resolution",
                 evidence={
-                    "peak_severity": round(trans.severity, 4),
+                    "crisis_instance_id": iid,
+                    "peak_severity": round(trans.peak_metric, 4),
                     "recovery_progress": 1.0,
+                    "crisis_start_tick": trans.crisis_start_tick,
+                    "resolution_tick": trans.resolution_tick,
                 },
                 source_type=SOURCE_TYPE.RECOVERY,
             )
             new_events.append(resolved_ev)
 
-        # v0.4.5.2 §10: Recovery failed → re-entered ACTIVE/SEVERE
-        if trans.recovery_failed:
-            # Log it but don't create a separate event — the crisis is still active
-            pass
-
     return new_events
+
 
 
 def _evaluate_endogenous_triggers(society, agents: Sequence[Agent], cfg: dict,
@@ -473,7 +477,7 @@ def step_events(society, cfg: dict, rng: random.Random, resolved: Optional[list]
                         duration=DURATION.get(crisis_event_type, 40),
                         trigger_score=trans.metric_value,
                         causal_confidence=0.9,
-                        evidence={"metric_value": round(trans.metric_value, 4)},
+                        evidence={"crisis_instance_id": trans.crisis_instance_id, "metric_value": round(trans.metric_value, 4)},
                         cause_mechanism="crisis_state_machine",
                     )
                     new_events.append(crisis_ev)

@@ -56,6 +56,11 @@ politics:
   damping: 0.92
   center_stability: 0.005
   ideology_anchor_strength: 0.02
+  # v0.4.5.3 §26: Anchor adaptation — strength weakens over long run
+  anchor:
+    initial_strength: 0.02
+    long_run_strength: 0.005
+    adaptation_days: 3650  # ~10 years
   max_movement_per_tick: 0.03
   # 资源政治力只响应超出正常运行基线的稀缺，以及压力上升沿。
   resource_pressure_baseline: 0.20

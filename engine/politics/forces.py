@@ -361,9 +361,19 @@ def compute_forces(a: Agent, society, params: ForceParams, rng, pressure: float,
 
     # ---- 个人锚点 ----------------------------------------------------------
     ax, ay, az = a.ideology_anchor
-    fx_anchor = (ax - a.ideology.x) * params.anchor_strength
-    fy_anchor = (ay - a.ideology.y) * params.anchor_strength
-    fz_anchor = (az - a.ideology.z) * params.anchor_strength
+    # v0.4.5.3 §26: Anchor adaptation — strength weakens over time
+    # Early: identity inertia stronger; Long run: social experience can reshape
+    adapted_anchor = params.anchor_strength
+    if hasattr(a, '_anchor_adapt_days') and a._anchor_adapt_days > 0:
+        days = getattr(a, '_simulated_days', 0)
+        initial = params.anchor_strength
+        long_run = getattr(a, '_anchor_long_run_strength', initial * 0.25)
+        adapt_days = a._anchor_adapt_days
+        t = min(1.0, days / adapt_days)
+        adapted_anchor = initial * (1 - t) + long_run * t
+    fx_anchor = (ax - a.ideology.x) * adapted_anchor
+    fy_anchor = (ay - a.ideology.y) * adapted_anchor
+    fz_anchor = (az - a.ideology.z) * adapted_anchor
 
     # ---- 中心稳定力 --------------------------------------------------------
     fx_center = -a.ideology.x * params.center_stability

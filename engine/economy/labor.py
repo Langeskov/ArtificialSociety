@@ -178,13 +178,21 @@ class LaborMarket:
 
     def rebalance(self, agents: List, rng: random.Random,
                   pressure: float, layoff_threshold: float = 0.65,
-                  layoff_fraction: float = 0.10) -> Dict[str, int]:
-        """One daily labor-market update: layoffs first, then hiring."""
-        result = self.apply_market_stress(
-            agents, rng, pressure, layoff_threshold, layoff_fraction
-        )
-        result["hired"] = len(self.hire(agents, rng))
-        return result
+                  layoff_fraction: float = 0.10,
+                  recovery_threshold: float = 0.45) -> Dict[str, int]:
+        """Update the labor market without cancelling its own contraction.
+
+        High pressure contracts employment. Hiring resumes only after pressure
+        falls below a lower recovery threshold, producing real hysteresis.
+        """
+        if pressure >= layoff_threshold:
+            return self.apply_market_stress(
+                agents, rng, pressure, layoff_threshold, layoff_fraction
+            )
+        if pressure <= recovery_threshold:
+            result = {"laid_off": 0, "hired": len(self.hire(agents, rng))}
+            return result
+        return {"laid_off": 0, "hired": 0}
 
 
 def create_initial_jobs(agents: List, structure: Dict, cfg: Dict,

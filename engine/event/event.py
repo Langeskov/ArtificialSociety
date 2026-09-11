@@ -61,6 +61,12 @@ EVENT_SOURCE_MAP: dict[str, SOURCE_TYPE] = {
     "food_stabilization": SOURCE_TYPE.RECOVERY,
     "recovery": SOURCE_TYPE.RECOVERY,
     "resource_stabilization": SOURCE_TYPE.RECOVERY,
+    "economic_recovery_started": SOURCE_TYPE.RECOVERY,
+    "food_stabilization_started": SOURCE_TYPE.RECOVERY,
+    "recovery_started": SOURCE_TYPE.RECOVERY,
+    "economic_crisis_resolved": SOURCE_TYPE.RECOVERY,
+    "food_crisis_resolved": SOURCE_TYPE.RECOVERY,
+    "protest_resolved": SOURCE_TYPE.RECOVERY,
     # Other
     "resource_boom": SOURCE_TYPE.ENDOGENOUS,
     "government_response": SOURCE_TYPE.ENDOGENOUS,
@@ -204,6 +210,14 @@ class EventChain:
         if scope is None:
             scope = EVENT_SCOPE.REGIONAL
 
+        event_evidence = dict(evidence or {})
+        event_effects = dict(effects or {})
+        # v0.4.5.4: crisis_instance_id is lifecycle identity, not merely
+        # explanatory evidence. Keep it in effects too so existing lifecycle
+        # lookup code and API consumers can bind recovery events reliably.
+        if "crisis_instance_id" in event_evidence and "crisis_instance_id" not in event_effects:
+            event_effects["crisis_instance_id"] = event_evidence["crisis_instance_id"]
+
         return self.add(
             Event(
                 event_id="",
@@ -212,7 +226,7 @@ class EventChain:
                 source=source,
                 targets=targets or [],
                 severity=severity,
-                effects=effects or {},
+                effects=event_effects,
                 description=description or type,
                 cause_event_id=cause_event_id,
                 intensity=intensity if intensity is not None else severity,
@@ -222,7 +236,7 @@ class EventChain:
                 trigger_score=trigger_score,
                 causal_confidence=causal_confidence,
                 cause_mechanism=cause_mechanism,
-                evidence=evidence or {},
+                evidence=event_evidence,
                 scope=scope,
                 region=region,
             )

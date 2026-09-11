@@ -13,9 +13,6 @@ import random
 
 from .population import SECTORS, SECTOR_WAGE_MODIFIER
 
-
-# Sector -> existing occupation system. Keep occupation values compatible with
-# engine/economy/occupation.py so the existing work production path is reused.
 SECTOR_OCCUPATION = {
     "primary": "farmer",
     "secondary": "manufacturer",
@@ -59,8 +56,7 @@ class LaborMarket:
                 openings[job.sector] += 1
 
         for sector in SECTORS:
-            w = max(1, workers[sector])
-            self.sector_demand[sector] = openings[sector] / w
+            self.sector_demand[sector] = openings[sector] / max(1, workers[sector])
 
     def compute_wage(self, sector: str, skill: float) -> float:
         """Wage = base × skill × sector modifier × demand modifier."""
@@ -76,11 +72,7 @@ class LaborMarket:
         for job in self.job_openings:
             if job.filled:
                 continue
-            if job.region != getattr(agent, "location", "A"):
-                # Regional mismatch is a penalty, not a hard exclusion.
-                region_penalty = 0.8
-            else:
-                region_penalty = 1.0
+            region_penalty = 1.0 if job.region == getattr(agent, "location", "A") else 0.8
             skill = skills.get(job.sector, 0.0)
             if skill * region_penalty >= job.required_skill * 0.5:
                 available.append(job)
@@ -88,7 +80,6 @@ class LaborMarket:
 
     @staticmethod
     def _set_employed(agent, job: JobOpening) -> None:
-        """Synchronize all legacy employment fields from one job assignment."""
         agent.sector = job.sector
         agent.employment_status = "employed"
         agent.employer = job.employer_id
@@ -97,12 +88,37 @@ class LaborMarket:
 
     @staticmethod
     def _set_unemployed(agent) -> None:
-        """Release employment without deleting the agent's skill profile."""
         agent.sector = "unemployed"
         agent.employment_status = "unemployed"
         agent.employer = None
         agent.occupation = "worker"
         agent.status["wage_rate"] = 0.0
+
+    def bootstrap_employment(self, agents: List, rng: random.Random) -> Dict[str, str]:
+        """Bind initially employed agents to real jobs once at simulation start."""
+        self.update_demand(agents)
+        assignments: Dict[str, str] = {}
+        candidates = [
+            a for a in agents
+            if a.alive
+            and getattr(a, "sector", "unemployed") != "unemployed"
+            and not getattr(a, "employer", None)
+        ]
+        rng.shuffle(candidates)
+        for agent in candidates:
+            jobs = [j for j in self.find_jobs(agent, rng) if j.sector == getattr(agent, "sector", "")]
+            if not jobs:
+                continue
+            skill = (getattr(agent, "skills", {}) or {}).get(agent.sector, 0.0)
+            for job in jobs:
+                job.wage = self.compute_wage(job.sector, skill)
+            job = max(jobs, key=lambda j: j.wage)
+            job.filled = True
+            job.worker_id = agent.id
+            self._set_employed(agent, job)
+            assignments[agent.id] = job.id
+        self.update_demand(agents)
+        return assignments
 
     def hire(self, agents: List, rng: random.Random) -> Dict[str, str]:
         """Match unemployed agents to open jobs and synchronize employment."""
@@ -118,13 +134,10 @@ class LaborMarket:
             jobs = self.find_jobs(agent, rng)
             if not jobs:
                 continue
-
-            # Prefer the best wage after considering current sector demand.
             for job in jobs:
                 skill = (getattr(agent, "skills", {}) or {}).get(job.sector, 0.0)
                 job.wage = self.compute_wage(job.sector, skill)
             best = max(jobs, key=lambda j: j.wage)
-
             if best.filled:
                 continue
             best.filled = True
@@ -137,37 +150,24 @@ class LaborMarket:
 
     def release_worker(self, agent, agents_by_id: Optional[dict] = None) -> bool:
         """Release one worker and reopen their job."""
-        released = False
         for job in self.job_openings:
             if job.filled and job.worker_id == agent.id:
                 job.filled = False
                 job.worker_id = None
-                released = True
-                break
-        if released:
-            self._set_unemployed(agent)
-        return released
+                self._set_unemployed(agent)
+                return True
+        return False
 
     def apply_market_stress(self, agents: List, rng: random.Random,
                             pressure: float,
                             layoff_threshold: float = 0.65,
                             layoff_fraction: float = 0.10) -> Dict[str, int]:
-        """Apply small layoffs during sustained resource/economic stress.
-
-        This is intentionally conservative: the LaborMarket only releases a
-        fraction of workers once per update. Recovery is handled by `hire()`
-        using the same reopened jobs.
-        """
+        """Apply small layoffs during sustained resource/economic stress."""
         result = {"laid_off": 0, "hired": 0}
         if pressure < layoff_threshold:
             return result
 
         employed = [a for a in agents if a.alive and a.employer]
-        if not employed:
-            return result
-
-        # Do not wipe out a sector during a bad tick. Public employment is also
-        # kept stable so the government-response layer remains available.
         candidates = [a for a in employed if getattr(a, "sector", "") != "public"]
         rng.shuffle(candidates)
         count = max(1, int(len(candidates) * layoff_fraction)) if candidates else 0
@@ -183,8 +183,7 @@ class LaborMarket:
         result = self.apply_market_stress(
             agents, rng, pressure, layoff_threshold, layoff_fraction
         )
-        hires = self.hire(agents, rng)
-        result["hired"] = len(hires)
+        result["hired"] = len(self.hire(agents, rng))
         return result
 
 
@@ -206,7 +205,7 @@ def create_initial_jobs(agents: List, structure: Dict, cfg: Dict,
                 sector=sector,
                 occupation=occupation,
                 required_skill=0.2 + rng.random() * 0.3,
-                wage=1.0 * SECTOR_WAGE_MODIFIER.get(sector, 1.0),
+                wage=SECTOR_WAGE_MODIFIER.get(sector, 1.0),
                 region=rng.choice(["A", "B", "C"]),
                 employer_id=f"employer_{sector}_{i}",
             ))

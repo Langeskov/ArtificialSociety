@@ -42,34 +42,30 @@ class Society:
     clock: Clock = field(default_factory=Clock)
     agents: list[Agent] = field(default_factory=list)
     events: EventChain = field(default_factory=EventChain)
-    status: str = "created"     # created | running | paused | finished
-    speed: float = 1.0          # ticks per engine step
+    status: str = "created"
+    speed: float = 1.0
     metrics_history: list = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
-    # v0.2 dynamics state
     production_multiplier: float = 1.0
     rng: Optional[random.Random] = None
     collapse_detector: Optional[CollapseDetector] = None
     _network: Optional[dict] = None
     _agent_map: Optional[dict] = None
-    # v0.4 social layer
-    groups: GroupRegistry = field(default_factory=GroupRegistry)      # §70
-    information_messages: list = field(default_factory=list)          # §70
-    social_state: str = "NORMAL"                                      # §54 诊断分类
-    # v0.4.1 resource layer
-    resource_ledger: ResourceLedger = field(default_factory=ResourceLedger)  # §62
-    regions: Optional[RegionRegistry] = None                            # §31
-    # v0.4.2: crisis state machine + resource flow accounting
+    groups: GroupRegistry = field(default_factory=GroupRegistry)
+    information_messages: list = field(default_factory=list)
+    social_state: str = "NORMAL"
+    resource_ledger: ResourceLedger = field(default_factory=ResourceLedger)
+    regions: Optional[RegionRegistry] = None
     crisis_manager: CrisisManager = field(default_factory=CrisisManager)
-    labor_market: object = None                              # v0.4.4: LaborMarket
-    production_units: list = field(default_factory=list)      # v0.4.4: List[ProductionUnit]
-    initial_structure: object = None                         # v0.4.4: PopulationSnapshot at tick 0
-    agent_unit_map: dict = field(default_factory=dict)       # v0.4.4: {agent_id: unit_id}
+    labor_market: object = None
+    production_units: list = field(default_factory=list)
+    initial_structure: object = None
+    agent_unit_map: dict = field(default_factory=dict)
     crisis_memory: CrisisMemory = field(default_factory=CrisisMemory)
     oscillation_detector: OscillationDetector = field(default_factory=OscillationDetector)
     feedback_diagnostics: FeedbackDiagnostics = field(default_factory=FeedbackDiagnostics)
     production_disruption: float = 0.0
-    equilibrium_monitor: object = None  # v0.4.5.3: DynamicEquilibriumMonitor  # v0.4.2 §19: 临时干扰（非永久 ratchet）
+    equilibrium_monitor: object = None
     resource_flow: dict = field(default_factory=lambda: {
         "food_produced": 0.0, "food_consumed": 0.0,
         "food_traded_in": 0.0, "food_traded_out": 0.0,
@@ -83,18 +79,14 @@ class Society:
             days_per_month=self.config.get("days_per_month", 30),
             months_per_year=self.config.get("months_per_year", 12),
         )
-        # Persistent, seed-derived RNG → deterministic replay (§33).
         self.rng = random.Random(self.seed)
         if not self.agents and self.config.get("population"):
             self.agents = generate_population(self.config["population"], self.seed, self.config)
         self._agent_map = {a.id: a for a in self.agents}
 
-
-        # v0.4.1: 区域资源模型（§31）
         region_ids = self.config.get("regions", {}).get("list", ["A", "B", "C"])
         self.regions = RegionRegistry(region_ids)
 
-        # v0.4.4: Production Units and Labor Market
         if self.agents:
             pop_s = self.config.get('society', {}).get('population_structure', DEFAULT_STRUCTURE)
             pop_s = normalize_structure(pop_s)
@@ -105,14 +97,14 @@ class Society:
             self.agent_unit_map = assign_workers_to_units(self.agents, self.production_units, self.rng)
             self.labor_market.update_demand(self.agents)
 
-        # v0.4.4: crisis thresholds/cooldowns are config-driven, including
-        # economic_crisis (which previously had no stateful cooldown).
-        self.crisis_manager.configure(self.config)
+            # Internal, non-serialized back-reference used by the economy step.
+            # The market remains scoped to this Society and is never shared.
+            for agent in self.agents:
+                agent._labor_market = self.labor_market
 
-        # v0.4.5.3: Dynamic equilibrium monitor
+        self.crisis_manager.configure(self.config)
         self.equilibrium_monitor = DynamicEquilibriumMonitor()
 
-        # Collapse detector configured from the stability section (§26).
         stab = self.config.get("stability", {})
         self.collapse_detector = CollapseDetector(
             variance_threshold=stab.get("collapse_variance_threshold", 0.02),
@@ -148,7 +140,6 @@ class Society:
             "group_count": len(self.groups.active()),
             "information_count": len(self.information_messages),
             "social_state": self.social_state,
-            # v0.4.1: 区域资源（§50）
             "regions": self.regions.as_list() if self.regions else [],
             "metrics": self.metrics(),
             "config": self.config,

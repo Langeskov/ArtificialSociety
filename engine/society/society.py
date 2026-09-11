@@ -95,6 +95,7 @@ class Society:
             self.labor_market.job_openings = create_initial_jobs(self.agents, pop_s, self.config, self.rng)
             self.production_units = create_initial_units(self.agents, pop_s, region_ids, self.config, self.rng)
             self.agent_unit_map = assign_workers_to_units(self.agents, self.production_units, self.rng)
+            self.labor_market.bootstrap_employment(self.agents, self.rng)
             self.labor_market.update_demand(self.agents)
 
             # Internal, non-serialized back-reference used by the economy step.

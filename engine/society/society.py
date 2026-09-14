@@ -2,11 +2,6 @@
 
 A Society owns its clock, agents, event chain, config and metrics history.
 Multiple societies run concurrently inside the SimulationEngine.
-
-v0.2: additionally owns a persistent RNG (determinism §33), a production
-multiplier (recovery §13), and a CollapseDetector (§26).
-
-v0.4.5: adds EventLoopDetector, EventEcologyDashboard, EventQueue, CausalCooldown.
 """
 
 from __future__ import annotations
@@ -29,9 +24,9 @@ from ..crisis.tracker import CrisisManager
 from ..crisis.memory import CrisisMemory
 from ..crisis.diagnostics import OscillationDetector, FeedbackDiagnostics
 from ..dynamics.equilibrium import DynamicEquilibriumMonitor
-from ..economy.population import DEFAULT_STRUCTURE, normalize_structure, PopulationSnapshot, assign_sector, compute_skills
+from ..economy.population import DEFAULT_STRUCTURE, normalize_structure, PopulationSnapshot
 from ..economy.labor import LaborMarket, create_initial_jobs
-from ..economy.production_unit import ProductionUnit, create_initial_units, assign_workers_to_units
+from ..economy.production_unit import create_initial_units, assign_workers_to_units
 
 
 @dataclass
@@ -84,6 +79,22 @@ class Society:
             self.agents = generate_population(self.config["population"], self.seed, self.config)
         self._agent_map = {a.id: a for a in self.agents}
 
+        # v0.4.6: the anchor-adaptation fields existed in the force layer but
+        # were never initialized from configuration, so long-run adaptation was
+        # effectively disabled. Activate them per Society without changing the
+        # Agent constructor API.
+        anchor_cfg = self.config.get("politics", {}).get("anchor", {})
+        anchor_days = float(anchor_cfg.get("adaptation_days", 3650))
+        anchor_long = float(anchor_cfg.get("long_run_strength", 0.005))
+        for agent in self.agents:
+            agent._anchor_adapt_days = max(1.0, anchor_days)
+            agent._anchor_long_run_strength = max(0.0, anchor_long)
+            agent.status["_structural_signature"] = (
+                getattr(agent, "sector", "unemployed"),
+                getattr(agent, "location", "A"),
+                getattr(agent, "employer", None),
+            )
+
         region_ids = self.config.get("regions", {}).get("list", ["A", "B", "C"])
         self.regions = RegionRegistry(region_ids)
 
@@ -97,11 +108,13 @@ class Society:
             self.agent_unit_map = assign_workers_to_units(self.agents, self.production_units, self.rng)
             self.labor_market.bootstrap_employment(self.agents, self.rng)
             self.labor_market.update_demand(self.agents)
-
-            # Internal, non-serialized back-reference used by the economy step.
-            # The market remains scoped to this Society and is never shared.
             for agent in self.agents:
                 agent._labor_market = self.labor_market
+                agent.status["_structural_signature"] = (
+                    getattr(agent, "sector", "unemployed"),
+                    getattr(agent, "location", "A"),
+                    getattr(agent, "employer", None),
+                )
 
         self.crisis_manager.configure(self.config)
         self.equilibrium_monitor = DynamicEquilibriumMonitor()
@@ -141,6 +154,7 @@ class Society:
             "group_count": len(self.groups.active()),
             "information_count": len(self.information_messages),
             "social_state": self.social_state,
+            "equilibrium": self.equilibrium_monitor.snapshot() if self.equilibrium_monitor else {"classification": "UNKNOWN"},
             "regions": self.regions.as_list() if self.regions else [],
             "metrics": self.metrics(),
             "config": self.config,

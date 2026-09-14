@@ -28,6 +28,7 @@ def _adapted_resource_pressure(agent: Agent, pressure: float, dt_days: float, po
 
 
 def _update_structural_experience(agent: Agent, dt_days: float) -> bool:
+    """Turn employment/sector/location changes into durable experience."""
     signature = (
         getattr(agent, "sector", "unemployed"),
         getattr(agent, "location", "A"),
@@ -55,15 +56,19 @@ def _update_structural_experience(agent: Agent, dt_days: float) -> bool:
 
 
 def _social_conformity(agent: Agent) -> float:
+    """Return a bounded per-agent social-response coefficient around zero.
+
+    Neutral trust/openness should not turn the whole society into a consensus
+    averaging machine. High trust produces conformity; openness in excess of
+    trust creates bounded reactance and therefore a genuine counter-force.
+    """
     trust = float(agent.personality["trust"])
     openness = float(agent.personality["openness"])
     authority = float(agent.personality["authority_preference"])
-    reactance = max(0.0, openness - trust)
-    conformity = 0.25 + 0.75 * trust
-    conformity -= 0.20 * reactance
-    if trust < 0.30 and openness > 0.70 and authority < 0.45:
-        conformity -= 0.08
-    return max(-0.15, min(1.25, conformity))
+    conformity = 1.4 * (trust - 0.5) - 0.8 * (openness - 0.5)
+    if authority > 0.7 and trust > 0.55:
+        conformity += 0.08
+    return max(-1.0, min(1.0, conformity))
 
 
 def step_politics(

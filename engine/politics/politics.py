@@ -1,13 +1,4 @@
-"""Politics — 意识形态漂移，v0.3 三轴独立动力学重构（§3, §4, §5）。
-
-政治状态是三维动力系统：每轴拥有 position / velocity / inertia / damping /
-anchor / external force。所有力源经 `forces.compute_forces` 统一计算，输出
-可解释的力分解（Axis Contribution Breakdown）。
-
-更新公式（§3）：
-    target = position + Σ forces(经济/权威/社区/事件/社会/锚点/中心/耦合/噪声)
-    position, velocity = spring_damper(position, velocity, target, inertia, damping)
-"""
+"""Politics — 三轴政治动力学。"""
 
 from __future__ import annotations
 
@@ -15,19 +6,12 @@ import random
 from typing import Optional
 
 from ..agent.agent import Agent
-from ..dynamics.damping import spring_damper_update
 from ..dynamics.stability import extremism
 from .forces import compute_forces, make_force_params, interpret_event, _resource_pressure  # noqa: F401
 
 
 def _adapted_resource_pressure(agent: Agent, pressure: float, dt_days: float, pol_cfg: Optional[dict] = None) -> float:
-    """Turn sustained scarcity into a bounded shock instead of an endless drift.
-
-    Resource pressure is a social condition, not a vote repeated every tick.
-    Keep the rising edge strong, then adapt toward a small residual response;
-    this prevents a long food shortage from integrating into an artificial X
-    boundary attractor while still preserving crisis-driven movement.
-    """
+    """Turn sustained scarcity into a bounded shock instead of endless drift."""
     status = agent.status
     previous = float(status.get("_political_resource_pressure", pressure))
     rising_edge = max(0.0, pressure - previous)
@@ -36,21 +20,53 @@ def _adapted_resource_pressure(agent: Agent, pressure: float, dt_days: float, po
     exposure = min(1.0, exposure * 0.999)
     status["_political_resource_pressure"] = pressure
     status["_political_resource_exposure"] = exposure
-    # Resource pressure has a normal operating baseline: a new Agent with
-    # roughly 500 money already has about 0.2 pressure under the legacy
-    # resource scale.  Treating that baseline as a political shock creates a
-    # constant X-axis drift even when the society is healthy.  Only scarcity
-    # above the baseline and the rising edge should move politics.
     pol_cfg = pol_cfg or {}
     baseline = float(pol_cfg.get("resource_pressure_baseline", 0.20))
     persistent_scale = float(pol_cfg.get("resource_pressure_persistent_scale", 0.12))
     rising_edge_gain = float(pol_cfg.get("resource_pressure_rising_edge_gain", 1.5))
     persistent = max(0.0, pressure - baseline)
-    return min(
-        1.0,
-        persistent_scale * persistent * (1.0 - 0.75 * exposure)
-        + rising_edge_gain * rising_edge,
+    return min(1.0, persistent_scale * persistent * (1.0 - 0.75 * exposure) + rising_edge_gain * rising_edge)
+
+
+def _update_structural_experience(agent: Agent, dt_days: float) -> bool:
+    """Turn employment/sector/location changes into durable experience, not noise."""
+    signature = (
+        getattr(agent, "sector", "unemployed"),
+        getattr(agent, "location", "A"),
+        getattr(agent, "employer", None),
     )
+    previous = agent.status.get("_structural_signature")
+    changed = previous is not None and previous != signature
+    agent.status["_structural_signature"] = signature
+
+    experience = float(getattr(agent, "structural_experience", 0.0))
+    experience *= 0.998 ** max(dt_days, 0.0)
+    if changed:
+        experience = min(1.0, experience + 0.08)
+        agent.structural_change_count = int(getattr(agent, "structural_change_count", 0)) + 1
+        current = (agent.ideology.x, agent.ideology.y, agent.ideology.z)
+        ax, ay, az = agent.ideology_anchor
+        blend = 0.04
+        agent.ideology_anchor = (
+            ax * (1.0 - blend) + current[0] * blend,
+            ay * (1.0 - blend) + current[1] * blend,
+            az * (1.0 - blend) + current[2] * blend,
+        )
+    agent.structural_experience = experience
+    return changed
+
+
+def _social_conformity(agent: Agent) -> float:
+    """Per-agent social influence multiplier with bounded reactance."""
+    trust = float(agent.personality.get("trust", 0.5))
+    openness = float(agent.personality.get("openness", 0.5))
+    authority = float(agent.personality.get("authority_preference", 0.5))
+    reactance = max(0.0, openness - trust)
+    conformity = 0.25 + 0.75 * trust
+    conformity -= 0.20 * reactance
+    if trust < 0.30 and openness > 0.70 and authority < 0.45:
+        conformity -= 0.08
+    return max(-0.15, min(1.25, conformity))
 
 
 def step_politics(
@@ -61,7 +77,6 @@ def step_politics(
 ) -> None:
     """推进一个 tick 的政治更新（三轴独立 + 弱耦合）。"""
     agents = society.agents
-
     pol = cfg.get("politics", {})
     damping = pol.get("damping", 0.92)
     max_movement = pol.get("max_movement_per_tick", 0.03)
@@ -73,47 +88,38 @@ def step_politics(
         if not a.alive:
             continue
 
-        # ---- 1. 统一力计算（Axis Force Registry） ------------------------
+        _update_structural_experience(a, getattr(society.clock, "dt_days", 0.01))
         pressure = _resource_pressure(a)
-        pressure_signal = _adapted_resource_pressure(
-            a, pressure, getattr(society.clock, "dt_days", 0.01), pol)
-        (tx, ty, tz), breakdown = compute_forces(a, society, params, rng, pressure_signal, build_breakdown)
+        pressure_signal = _adapted_resource_pressure(a, pressure, getattr(society.clock, "dt_days", 0.01), pol)
 
-        # ---- 2. 目标 = 当前位置 + 总力（裁剪到 [-1,1]） -------------------
+        base_influence = params.influence_strength
+        params.influence_strength = base_influence * _social_conformity(a)
+        try:
+            (tx, ty, tz), breakdown = compute_forces(a, society, params, rng, pressure_signal, build_breakdown)
+        finally:
+            params.influence_strength = base_influence
+
         target_x = max(-1.0, min(1.0, a.ideology.x + tx))
         target_y = max(-1.0, min(1.0, a.ideology.y + ty))
         target_z = max(-1.0, min(1.0, a.ideology.z + tz))
 
-        # ---- 3. 惯性 + 阻尼更新（内联，§4, §5） --------------------------
         inertia = a.political_inertia
         mf = 1.0 - max(0.0, min(1.0, inertia))
         vx = a.political_velocity[0] * damping + (target_x - a.ideology.x) * mf
         vy = a.political_velocity[1] * damping + (target_y - a.ideology.y) * mf
         vz = a.political_velocity[2] * damping + (target_z - a.ideology.z) * mf
-        if vx > max_movement:
-            vx = max_movement
-        elif vx < -max_movement:
-            vx = -max_movement
-        if vy > max_movement:
-            vy = max_movement
-        elif vy < -max_movement:
-            vy = -max_movement
-        if vz > max_movement:
-            vz = max_movement
-        elif vz < -max_movement:
-            vz = -max_movement
+        vx = max(-max_movement, min(max_movement, vx))
+        vy = max(-max_movement, min(max_movement, vy))
+        vz = max(-max_movement, min(max_movement, vz))
         a.ideology.x += vx
         a.ideology.y += vy
         a.ideology.z += vz
-        a.political_velocity[0] = vx
-        a.political_velocity[1] = vy
-        a.political_velocity[2] = vz
+        a.political_velocity[:] = [vx, vy, vz]
 
-        # ---- 4. 极端化代价（§7）：社会摩擦 + 轻微去极端化（非强制） --------
         ext = extremism(a.ideology.x, a.ideology.y, a.ideology.z)
         a.status["extremism"] = ext
         if ext > extremism_threshold:
-            friction = (ext - extremism_threshold) / (1.0 - extremism_threshold)
+            friction = (ext - extremism_threshold) / max(1e-9, 1.0 - extremism_threshold)
             a.status["social_friction"] = friction
             a.ideology.x += -a.ideology.x * 0.002 * friction
             a.ideology.y += -a.ideology.y * 0.002 * friction
@@ -121,22 +127,21 @@ def step_politics(
         else:
             a.status["social_friction"] = 0.0
 
-        # ---- 5. 边界裁剪（§36：允许极端，只裁剪数值不重置） -------------
         a.ideology.x = max(-1.0, min(1.0, a.ideology.x))
         a.ideology.y = max(-1.0, min(1.0, a.ideology.y))
         a.ideology.z = max(-1.0, min(1.0, a.ideology.z))
 
-        # ---- 6. 愤怒 / 政府信任：惯性平滑，避免瞬间锁死 ------------------
         target_anger = 0.15 + pressure * 0.7
         a.status["anger"] += (target_anger - a.status["anger"]) * (1.0 - inertia) * 2.0
         target_trust_gov = 0.5 - a.status["anger"] * 0.5 + a.personality["authority_preference"] * 0.2
         a.status["trust_in_government"] += (target_trust_gov - a.status["trust_in_government"]) * (1.0 - inertia)
         a.status["trust_in_government"] = max(0.0, min(1.0, a.status["trust_in_government"]))
 
-        # ---- 7. 保存力分解（供 Inspector 可解释性 §5, §37） --------------
         if breakdown is not None:
             a.last_forces = {
                 "x": {k: round(v, 5) for k, v in breakdown["x"].items()},
                 "y": {k: round(v, 5) for k, v in breakdown["y"].items()},
                 "z": {k: round(v, 5) for k, v in breakdown["z"].items()},
+                "social_conformity": round(_social_conformity(a), 4),
+                "structural_experience": round(a.structural_experience, 4),
             }

@@ -11,7 +11,6 @@ from .forces import compute_forces, make_force_params, interpret_event, _resourc
 
 
 def _adapted_resource_pressure(agent: Agent, pressure: float, dt_days: float, pol_cfg: Optional[dict] = None) -> float:
-    """Turn sustained scarcity into a bounded shock instead of endless drift."""
     status = agent.status
     previous = float(status.get("_political_resource_pressure", pressure))
     rising_edge = max(0.0, pressure - previous)
@@ -29,7 +28,6 @@ def _adapted_resource_pressure(agent: Agent, pressure: float, dt_days: float, po
 
 
 def _update_structural_experience(agent: Agent, dt_days: float) -> bool:
-    """Turn employment/sector/location changes into durable experience, not noise."""
     signature = (
         getattr(agent, "sector", "unemployed"),
         getattr(agent, "location", "A"),
@@ -57,10 +55,9 @@ def _update_structural_experience(agent: Agent, dt_days: float) -> bool:
 
 
 def _social_conformity(agent: Agent) -> float:
-    """Per-agent social influence multiplier with bounded reactance."""
-    trust = float(agent.personality.get("trust", 0.5))
-    openness = float(agent.personality.get("openness", 0.5))
-    authority = float(agent.personality.get("authority_preference", 0.5))
+    trust = float(agent.personality["trust"])
+    openness = float(agent.personality["openness"])
+    authority = float(agent.personality["authority_preference"])
     reactance = max(0.0, openness - trust)
     conformity = 0.25 + 0.75 * trust
     conformity -= 0.20 * reactance
@@ -75,7 +72,6 @@ def step_politics(
     rng: random.Random,
     relationships: Optional[dict[str, list[str]]] = None,
 ) -> None:
-    """推进一个 tick 的政治更新（三轴独立 + 弱耦合）。"""
     agents = society.agents
     pol = cfg.get("politics", {})
     damping = pol.get("damping", 0.92)

@@ -45,7 +45,7 @@ class LaborMarket:
     def update_demand(self, agents: List) -> None:
         workers = {s: 0 for s in SECTORS}
         for a in agents:
-            if a.alive:
+            if getattr(a, "alive", True):
                 sector = getattr(a, "sector", "unemployed")
                 workers[sector if sector in workers else "unemployed"] += 1
         openings = {s: 0 for s in SECTORS}
@@ -75,6 +75,8 @@ class LaborMarket:
 
     @staticmethod
     def _set_employed(agent, job: JobOpening) -> None:
+        if not hasattr(agent, "status") or agent.status is None:
+            agent.status = {}
         agent.sector = job.sector
         agent.employment_status = "employed"
         agent.employer = job.employer_id
@@ -83,6 +85,8 @@ class LaborMarket:
 
     @staticmethod
     def _set_unemployed(agent) -> None:
+        if not hasattr(agent, "status") or agent.status is None:
+            agent.status = {}
         agent.sector = "unemployed"
         agent.employment_status = "unemployed"
         agent.employer = None
@@ -93,7 +97,7 @@ class LaborMarket:
         self.next_job_id = max(self.next_job_id, len(self.job_openings))
         self.update_demand(agents)
         assignments: Dict[str, str] = {}
-        candidates = [a for a in agents if a.alive and getattr(a, "sector", "unemployed") != "unemployed" and not getattr(a, "employer", None)]
+        candidates = [a for a in agents if getattr(a, "alive", True) and getattr(a, "sector", "unemployed") != "unemployed" and not getattr(a, "employer", None)]
         rng.shuffle(candidates)
         for agent in candidates:
             jobs = [j for j in self.find_jobs(agent, rng) if j.sector == getattr(agent, "sector", "")]
@@ -113,7 +117,7 @@ class LaborMarket:
     def hire(self, agents: List, rng: random.Random) -> Dict[str, str]:
         self.update_demand(agents)
         hires: Dict[str, str] = {}
-        unemployed = [a for a in agents if a.alive and getattr(a, "sector", "unemployed") == "unemployed"]
+        unemployed = [a for a in agents if getattr(a, "alive", True) and getattr(a, "sector", "unemployed") == "unemployed"]
         rng.shuffle(unemployed)
         for agent in unemployed:
             jobs = self.find_jobs(agent, rng)
@@ -147,7 +151,7 @@ class LaborMarket:
         result = {"laid_off": 0, "hired": 0}
         if pressure < layoff_threshold:
             return result
-        employed = [a for a in agents if a.alive and a.employer]
+        employed = [a for a in agents if getattr(a, "alive", True) and getattr(a, "employer", None)]
         candidates = [a for a in employed if getattr(a, "sector", "") != "public"]
         rng.shuffle(candidates)
         count = max(1, int(len(candidates) * layoff_fraction)) if candidates else 0
@@ -168,9 +172,8 @@ class LaborMarket:
 
     def train(self, agents: List, rng: random.Random, learning_rate: float = 0.01,
               max_training_share: float = 0.08) -> int:
-        """Daily skill accumulation; training is preferentially chosen by unemployed or low-skill workers."""
         self.update_demand(agents)
-        candidates = [a for a in agents if a.alive and (getattr(a, "sector", "unemployed") == "unemployed" or getattr(a, "education_level", 0.5) < 0.7)]
+        candidates = [a for a in agents if getattr(a, "alive", True) and (getattr(a, "sector", "unemployed") == "unemployed" or getattr(a, "education_level", 0.5) < 0.7)]
         rng.shuffle(candidates)
         limit = max(1, int(len(agents) * max_training_share)) if candidates else 0
         trained = 0
@@ -202,7 +205,7 @@ class LaborMarket:
         for job in self.job_openings:
             if not job.filled and job.region in open_by_region:
                 open_by_region[job.region] += 1
-        candidates = [a for a in agents if a.alive and getattr(a, "sector", "unemployed") == "unemployed"]
+        candidates = [a for a in agents if getattr(a, "alive", True) and getattr(a, "sector", "unemployed") == "unemployed"]
         rng.shuffle(candidates)
         moved = 0
         limit = max(1, int(len(agents) * max_share)) if candidates else 0
@@ -211,7 +214,7 @@ class LaborMarket:
                 break
             here = getattr(agent, "location", regions[0])
             best = max(open_by_region, key=open_by_region.get) if open_by_region else here
-            if best == here or open_by_region.get(best, 0) <= open_by_region.get(here, 0) + 1:
+            if best == here or open_by_region.get(best, 0) <= open_by_region.get(here, 0):
                 continue
             money = agent.resources.available("money")
             if money < migration_cost:
@@ -224,8 +227,16 @@ class LaborMarket:
     def evolve_job_capacity(self, agents: List, regions: List[str], rng: random.Random,
                             creation_threshold: float = 1.5, closure_threshold: float = 0.10,
                             max_changes: int = 5) -> Dict[str, int]:
-        """Endogenous enterprise capacity: add jobs where demand is high and close idle capacity."""
-        self.update_demand(agents)
+        """Endogenous enterprise capacity: add jobs where demand is high and close idle capacity.
+
+        Preserve an explicitly supplied demand signal for this decision. The
+        daily simulation normally refreshes sector_demand before calling this,
+        while isolated mechanism tests may intentionally seed it directly.
+        """
+        had_demand = bool(self.sector_demand)
+        if not had_demand:
+            self.update_demand(agents)
+
         created = 0
         closed = 0
         sector_rank = sorted(
@@ -264,7 +275,10 @@ class LaborMarket:
                     closed += 1
                 except ValueError:
                     pass
-        self.update_demand(agents)
+
+        self.next_job_id = max(self.next_job_id, len(self.job_openings))
+        if not had_demand:
+            self.update_demand(agents)
         return {"jobs_created": created, "jobs_closed": closed}
 
 

@@ -1,8 +1,7 @@
-"""Labor Market (v0.4.5.5).
+"""Labor Market (v0.4.6).
 
-The project already has occupations, job openings and production units. This
-module keeps the existing abstractions and makes the LaborMarket the source of
-truth for employment state instead of creating a second job system.
+Employment is the first structural layer: jobs, wages, training, migration and
+endogenous expansion/contraction of job capacity.
 """
 
 from __future__ import annotations
@@ -41,32 +40,28 @@ class LaborMarket:
     base_wage: float = 1.0
     wage_adjustment_rate: float = 0.02
     sector_demand: Dict[str, float] = field(default_factory=dict)
+    next_job_id: int = 0
 
     def update_demand(self, agents: List) -> None:
-        """Update sector demand = open jobs / workers."""
         workers = {s: 0 for s in SECTORS}
         for a in agents:
             if a.alive:
                 sector = getattr(a, "sector", "unemployed")
                 workers[sector if sector in workers else "unemployed"] += 1
-
         openings = {s: 0 for s in SECTORS}
         for job in self.job_openings:
             if not job.filled and job.sector in openings:
                 openings[job.sector] += 1
-
         for sector in SECTORS:
             self.sector_demand[sector] = openings[sector] / max(1, workers[sector])
 
     def compute_wage(self, sector: str, skill: float) -> float:
-        """Wage = base × skill × sector modifier × demand modifier."""
         smod = SECTOR_WAGE_MODIFIER.get(sector, 1.0)
         demand = self.sector_demand.get(sector, 1.0)
         demand_factor = 1.0 + (demand - 1.0) * self.wage_adjustment_rate * 10
         return self.base_wage * max(0.1, skill) * smod * max(0.5, min(2.0, demand_factor))
 
     def find_jobs(self, agent, rng: random.Random) -> List[JobOpening]:
-        """Find available jobs for an agent based on skill and region."""
         skills = getattr(agent, "skills", {}) or {}
         available = []
         for job in self.job_openings:
@@ -95,15 +90,10 @@ class LaborMarket:
         agent.status["wage_rate"] = 0.0
 
     def bootstrap_employment(self, agents: List, rng: random.Random) -> Dict[str, str]:
-        """Bind initially employed agents to real jobs once at simulation start."""
+        self.next_job_id = max(self.next_job_id, len(self.job_openings))
         self.update_demand(agents)
         assignments: Dict[str, str] = {}
-        candidates = [
-            a for a in agents
-            if a.alive
-            and getattr(a, "sector", "unemployed") != "unemployed"
-            and not getattr(a, "employer", None)
-        ]
+        candidates = [a for a in agents if a.alive and getattr(a, "sector", "unemployed") != "unemployed" and not getattr(a, "employer", None)]
         rng.shuffle(candidates)
         for agent in candidates:
             jobs = [j for j in self.find_jobs(agent, rng) if j.sector == getattr(agent, "sector", "")]
@@ -121,15 +111,10 @@ class LaborMarket:
         return assignments
 
     def hire(self, agents: List, rng: random.Random) -> Dict[str, str]:
-        """Match unemployed agents to open jobs and synchronize employment."""
         self.update_demand(agents)
         hires: Dict[str, str] = {}
-        unemployed = [
-            a for a in agents
-            if a.alive and getattr(a, "sector", "unemployed") == "unemployed"
-        ]
+        unemployed = [a for a in agents if a.alive and getattr(a, "sector", "unemployed") == "unemployed"]
         rng.shuffle(unemployed)
-
         for agent in unemployed:
             jobs = self.find_jobs(agent, rng)
             if not jobs:
@@ -144,12 +129,10 @@ class LaborMarket:
             best.worker_id = agent.id
             self._set_employed(agent, best)
             hires[agent.id] = best.id
-
         self.update_demand(agents)
         return hires
 
     def release_worker(self, agent, agents_by_id: Optional[dict] = None) -> bool:
-        """Release one worker and reopen their job."""
         for job in self.job_openings:
             if job.filled and job.worker_id == agent.id:
                 job.filled = False
@@ -158,15 +141,12 @@ class LaborMarket:
                 return True
         return False
 
-    def apply_market_stress(self, agents: List, rng: random.Random,
-                            pressure: float,
+    def apply_market_stress(self, agents: List, rng: random.Random, pressure: float,
                             layoff_threshold: float = 0.65,
                             layoff_fraction: float = 0.10) -> Dict[str, int]:
-        """Apply small layoffs during sustained resource/economic stress."""
         result = {"laid_off": 0, "hired": 0}
         if pressure < layoff_threshold:
             return result
-
         employed = [a for a in agents if a.alive and a.employer]
         candidates = [a for a in employed if getattr(a, "sector", "") != "public"]
         rng.shuffle(candidates)
@@ -176,28 +156,120 @@ class LaborMarket:
                 result["laid_off"] += 1
         return result
 
-    def rebalance(self, agents: List, rng: random.Random,
-                  pressure: float, layoff_threshold: float = 0.65,
+    def rebalance(self, agents: List, rng: random.Random, pressure: float,
+                  layoff_threshold: float = 0.65,
                   layoff_fraction: float = 0.10,
                   recovery_threshold: float = 0.45) -> Dict[str, int]:
-        """Update the labor market without cancelling its own contraction.
-
-        High pressure contracts employment. Hiring resumes only after pressure
-        falls below a lower recovery threshold, producing real hysteresis.
-        """
         if pressure >= layoff_threshold:
-            return self.apply_market_stress(
-                agents, rng, pressure, layoff_threshold, layoff_fraction
-            )
+            return self.apply_market_stress(agents, rng, pressure, layoff_threshold, layoff_fraction)
         if pressure <= recovery_threshold:
-            result = {"laid_off": 0, "hired": len(self.hire(agents, rng))}
-            return result
+            return {"laid_off": 0, "hired": len(self.hire(agents, rng))}
         return {"laid_off": 0, "hired": 0}
+
+    def train(self, agents: List, rng: random.Random, learning_rate: float = 0.01,
+              max_training_share: float = 0.08) -> int:
+        """Daily skill accumulation; training is preferentially chosen by unemployed or low-skill workers."""
+        self.update_demand(agents)
+        candidates = [a for a in agents if a.alive and (getattr(a, "sector", "unemployed") == "unemployed" or getattr(a, "education_level", 0.5) < 0.7)]
+        rng.shuffle(candidates)
+        limit = max(1, int(len(agents) * max_training_share)) if candidates else 0
+        trained = 0
+        for agent in candidates[:limit]:
+            skills = getattr(agent, "skills", None)
+            if skills is None:
+                agent.skills = {}
+                skills = agent.skills
+            sector_scores = sorted(
+                ((s, self.sector_demand.get(s, 0.0) * 0.7 + skills.get(s, 0.0) * 0.3) for s in SECTORS if s != "unemployed"),
+                key=lambda item: item[1], reverse=True,
+            )
+            if not sector_scores:
+                continue
+            target = sector_scores[0][0]
+            current = float(skills.get(target, 0.0))
+            if current >= 1.0:
+                continue
+            skills[target] = min(1.0, current + learning_rate)
+            agent.education_level = min(1.0, float(getattr(agent, "education_level", 0.5)) + learning_rate * 0.5)
+            trained += 1
+        return trained
+
+    def migrate(self, agents: List, regions: List[str], rng: random.Random,
+                migration_cost: float = 30.0, max_share: float = 0.02) -> int:
+        """Move a small share of unemployed/underemployed agents toward open regional jobs."""
+        self.update_demand(agents)
+        open_by_region = {r: 0 for r in regions}
+        for job in self.job_openings:
+            if not job.filled and job.region in open_by_region:
+                open_by_region[job.region] += 1
+        candidates = [a for a in agents if a.alive and getattr(a, "sector", "unemployed") == "unemployed"]
+        rng.shuffle(candidates)
+        moved = 0
+        limit = max(1, int(len(agents) * max_share)) if candidates else 0
+        for agent in candidates:
+            if moved >= limit:
+                break
+            here = getattr(agent, "location", regions[0])
+            best = max(open_by_region, key=open_by_region.get) if open_by_region else here
+            if best == here or open_by_region.get(best, 0) <= open_by_region.get(here, 0) + 1:
+                continue
+            money = agent.resources.available("money")
+            if money < migration_cost:
+                continue
+            agent.resources.add("money", -migration_cost)
+            agent.location = best
+            moved += 1
+        return moved
+
+    def evolve_job_capacity(self, agents: List, regions: List[str], rng: random.Random,
+                            creation_threshold: float = 1.5, closure_threshold: float = 0.10,
+                            max_changes: int = 5) -> Dict[str, int]:
+        """Endogenous enterprise capacity: add jobs where demand is high and close idle capacity."""
+        self.update_demand(agents)
+        created = 0
+        closed = 0
+        sector_rank = sorted(
+            ((s, self.sector_demand.get(s, 0.0)) for s in SECTORS if s != "unemployed"),
+            key=lambda item: item[1], reverse=True,
+        )
+        for sector, demand in sector_rank:
+            if created >= max_changes or demand < creation_threshold:
+                continue
+            region = rng.choice(regions)
+            idx = self.next_job_id
+            self.next_job_id += 1
+            self.job_openings.append(JobOpening(
+                id=f"job_{idx}",
+                sector=sector,
+                occupation=SECTOR_OCCUPATION.get(sector, "service"),
+                required_skill=0.25 + rng.random() * 0.25,
+                wage=SECTOR_WAGE_MODIFIER.get(sector, 1.0),
+                region=region,
+                employer_id=f"enterprise_{sector}_{idx}",
+            ))
+            created += 1
+
+        idle_by_sector = {s: [] for s in SECTORS}
+        for job in self.job_openings:
+            if not job.filled and job.sector in idle_by_sector:
+                idle_by_sector[job.sector].append(job)
+        for sector, idle_jobs in idle_by_sector.items():
+            if closed >= max_changes or self.sector_demand.get(sector, 0.0) > closure_threshold:
+                continue
+            for job in idle_jobs[:-1] if len(idle_jobs) > 1 else []:
+                if closed >= max_changes:
+                    break
+                try:
+                    self.job_openings.remove(job)
+                    closed += 1
+                except ValueError:
+                    pass
+        self.update_demand(agents)
+        return {"jobs_created": created, "jobs_closed": closed}
 
 
 def create_initial_jobs(agents: List, structure: Dict, cfg: Dict,
                         rng: random.Random) -> List[JobOpening]:
-    """Create initial job openings proportional to sector size."""
     jobs = []
     n = len(agents)
     mult = cfg.get("labor", {}).get("jobs_multiplier", 1.2)

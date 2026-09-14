@@ -1,8 +1,4 @@
-"""Society — one independent artificial-society instance (§2.1).
-
-A Society owns its clock, agents, event chain, config and metrics history.
-Multiple societies run concurrently inside the SimulationEngine.
-"""
+"""Society — one independent artificial-society instance (§2.1)."""
 
 from __future__ import annotations
 
@@ -67,6 +63,10 @@ class Society:
         "energy_produced": 0.0, "energy_consumed": 0.0,
         "money_earned": 0.0, "money_taxed": 0.0,
     })
+    _equilibrium_last_tick: int = -1
+    _equilibrium_last_event_count: int = 0
+    _equilibrium_group_state: dict = field(default_factory=dict)
+    _equilibrium_employment_state: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.clock = Clock(
@@ -79,10 +79,6 @@ class Society:
             self.agents = generate_population(self.config["population"], self.seed, self.config)
         self._agent_map = {a.id: a for a in self.agents}
 
-        # v0.4.6: the anchor-adaptation fields existed in the force layer but
-        # were never initialized from configuration, so long-run adaptation was
-        # effectively disabled. Activate them per Society without changing the
-        # Agent constructor API.
         anchor_cfg = self.config.get("politics", {}).get("anchor", {})
         anchor_days = float(anchor_cfg.get("adaptation_days", 3650))
         anchor_long = float(anchor_cfg.get("long_run_strength", 0.005))
@@ -99,7 +95,7 @@ class Society:
         self.regions = RegionRegistry(region_ids)
 
         if self.agents:
-            pop_s = self.config.get('society', {}).get('population_structure', DEFAULT_STRUCTURE)
+            pop_s = self.config.get("society", {}).get("population_structure", DEFAULT_STRUCTURE)
             pop_s = normalize_structure(pop_s)
             self.initial_structure = PopulationSnapshot.from_agents(self.agents)
             self.labor_market = LaborMarket()
@@ -137,8 +133,64 @@ class Society:
     def get_agent(self, agent_id: str) -> Optional[Agent]:
         return self.agent_map().get(agent_id)
 
+    def _update_equilibrium(self, metrics: dict) -> None:
+        """Update the long-run monitor exactly once per simulation tick."""
+        if self.equilibrium_monitor is None or self.clock.tick <= self._equilibrium_last_tick:
+            return
+        alive = [a for a in self.agents if a.alive]
+        n = len(alive)
+        if n == 0:
+            return
+        event_delta = max(0, len(self.events.events) - self._equilibrium_last_event_count)
+        group_changed = 0
+        employment_changed = 0
+        next_groups = {}
+        next_employment = {}
+        for a in alive:
+            group_sig = getattr(a.identity, "primary_group", None)
+            emp_sig = (getattr(a, "sector", "unemployed"), getattr(a, "employer", None), getattr(a, "location", "A"))
+            next_groups[a.id] = group_sig
+            next_employment[a.id] = emp_sig
+            if a.id in self._equilibrium_group_state and self._equilibrium_group_state[a.id] != group_sig:
+                group_changed += 1
+            if a.id in self._equilibrium_employment_state and self._equilibrium_employment_state[a.id] != emp_sig:
+                employment_changed += 1
+
+        resource_values = [a.wealth() for a in alive]
+        mean_resource = sum(resource_values) / n
+        resource_variance = sum((v - mean_resource) ** 2 for v in resource_values) / n
+        resource_variance = resource_variance / max(mean_resource * mean_resource, 1.0)
+        political_velocity = (
+            metrics.get("x_abs_velocity", 0.0)
+            + metrics.get("y_abs_velocity", 0.0)
+            + metrics.get("z_abs_velocity", 0.0)
+        ) / 3.0
+        self.equilibrium_monitor.update(
+            tick=self.clock.tick,
+            ticks_per_day=self.clock.ticks_per_day,
+            event_count=event_delta,
+            political_variance=(
+                metrics.get("political_variance_x", 0.0)
+                + metrics.get("political_variance_y", 0.0)
+                + metrics.get("political_variance_z", 0.0)
+            ) / 3.0,
+            political_velocity=political_velocity,
+            resource_variance=resource_variance,
+            group_turnover=group_changed / n,
+            employment_turnover=employment_changed / n,
+        )
+        self._equilibrium_last_tick = self.clock.tick
+        self._equilibrium_last_event_count = len(self.events.events)
+        self._equilibrium_group_state = next_groups
+        self._equilibrium_employment_state = next_employment
+
     def metrics(self) -> dict:
-        return compute_metrics(self.agents, self.events, self.clock.tick, self.config)
+        metrics = compute_metrics(self.agents, self.events, self.clock.tick, self.config)
+        self._update_equilibrium(metrics)
+        eq = self.equilibrium_monitor.snapshot() if self.equilibrium_monitor else {"classification": "UNKNOWN"}
+        metrics["equilibrium_classification"] = eq.get("classification", "UNKNOWN")
+        metrics["political_freeze_score"] = eq.get("political_freeze_score", 0.0)
+        return metrics
 
     def snapshot(self) -> dict:
         return {

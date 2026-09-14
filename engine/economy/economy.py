@@ -1,9 +1,4 @@
-"""Economy — 基础代谢、税收、再分配（v0.4.5.5）。
-
-Existing LaborMarket is now connected to the daily resource cycle. It remains
-a thin employment layer: hiring/layoffs update Agent employment state while the
-existing behavior work action remains the single production path.
-"""
+"""Economy — resource metabolism plus structural labor dynamics (v0.4.6)."""
 
 from __future__ import annotations
 
@@ -13,49 +8,68 @@ from typing import Optional, Sequence
 from ..agent.agent import Agent
 
 
-def _labor_pressure(agents: Sequence[Agent]) -> float:
-    """Estimate labor-market stress from the existing continuous resource state.
+def _labor_market(agents: Sequence[Agent]):
+    for agent in agents:
+        market = getattr(agent, "_labor_market", None)
+        if market is not None:
+            return market
+    return None
 
-    This deliberately reuses resource_security instead of introducing a second
-    unemployment/economic pressure model.
-    """
+
+def _labor_pressure(agents: Sequence[Agent]) -> float:
     alive = [a for a in agents if a.alive]
     if not alive:
         return 0.0
-    avg_pressure = sum(
-        getattr(a, "resource_state", {}).get("pressure", 0.0) for a in alive
-    ) / len(alive)
-    unemployment = sum(
-        1 for a in alive if getattr(a, "sector", "unemployed") == "unemployed"
-    ) / len(alive)
+    avg_pressure = sum(getattr(a, "resource_state", {}).get("pressure", 0.0) for a in alive) / len(alive)
+    unemployment = sum(1 for a in alive if getattr(a, "sector", "unemployed") == "unemployed") / len(alive)
     return min(1.0, 0.70 * avg_pressure + 0.30 * unemployment)
 
 
 def _rebalance_labor(agents: Sequence[Agent], cfg: dict, rng: random.Random) -> dict:
-    """Daily labor rebalancing using the existing LaborMarket."""
-    market = None
-    for agent in agents:
-        # Society owns LaborMarket, but this function only receives agents for
-        # compatibility with the existing economy API. The market is attached
-        # by the simulation layer to each agent during initialization when
-        # available.
-        market = getattr(agent, "_labor_market", None)
-        if market is not None:
-            break
-
+    market = _labor_market(agents)
     if market is None:
         return {"laid_off": 0, "hired": 0}
-
     pressure = _labor_pressure(agents)
     labor_cfg = cfg.get("labor", {})
-    result = market.rebalance(
+    return market.rebalance(
         list(agents),
         rng,
         pressure=pressure,
         layoff_threshold=float(labor_cfg.get("layoff_pressure_threshold", 0.65)),
         layoff_fraction=float(labor_cfg.get("layoff_fraction", 0.10)),
     )
-    return result
+
+
+def _structural_labor_step(agents: Sequence[Agent], cfg: dict, rng: random.Random) -> dict:
+    """One daily structural pass: training, migration, enterprise capacity."""
+    market = _labor_market(agents)
+    if market is None:
+        return {"trained": 0, "migrated": 0, "jobs_created": 0, "jobs_closed": 0}
+
+    labor_cfg = cfg.get("labor", {})
+    regions = cfg.get("regions", {}).get("list", ["A", "B", "C"])
+    trained = market.train(
+        list(agents), rng,
+        learning_rate=float(labor_cfg.get("training_rate", 0.01)),
+        max_training_share=float(labor_cfg.get("training_share", 0.08)),
+    )
+    migrated = market.migrate(
+        list(agents), regions, rng,
+        migration_cost=float(labor_cfg.get("migration_cost", 30.0)),
+        max_share=float(labor_cfg.get("migration_share", 0.02)),
+    )
+    enterprise = market.evolve_job_capacity(
+        list(agents), regions, rng,
+        creation_threshold=float(labor_cfg.get("enterprise_creation_demand", 1.5)),
+        closure_threshold=float(labor_cfg.get("enterprise_closure_demand", 0.10)),
+        max_changes=int(labor_cfg.get("enterprise_max_changes_per_day", 5)),
+    )
+    return {
+        "trained": trained,
+        "migrated": migrated,
+        "jobs_created": enterprise.get("jobs_created", 0),
+        "jobs_closed": enterprise.get("jobs_closed", 0),
+    }
 
 
 def step_economy(
@@ -66,10 +80,9 @@ def step_economy(
     collect_tax: bool = False,
     dt_days: float = 0.01,
 ) -> dict:
-    """应用一 tick 的经济更新（基础代谢 + 税收 + 日度就业再平衡）。"""
+    """应用一 tick 的经济更新；结构性劳动力变化仅在日边界发生。"""
     econ = cfg.get("economy", {})
     daily = econ.get("daily", {})
-
     food_consumption_day = daily.get("food_consumption_per_agent", 5.0)
     energy_consumption_day = daily.get("energy_consumption_per_agent", 3.0)
     food_cons_tick = food_consumption_day * dt_days
@@ -89,24 +102,31 @@ def step_economy(
         "money_redistributed": 0.0,
         "labor_laid_off": 0,
         "labor_hired": 0,
+        "labor_trained": 0,
+        "labor_migrated": 0,
+        "jobs_created": 0,
+        "jobs_closed": 0,
     }
 
-    # v0.4.5.5: the daily economy boundary also updates employment. The work
-    # action in behavior.py remains the only resource-production path.
     if collect_tax:
         labor_result = _rebalance_labor(agents, cfg, rng)
         flow["labor_laid_off"] = labor_result.get("laid_off", 0)
         flow["labor_hired"] = labor_result.get("hired", 0)
+        structural = _structural_labor_step(agents, cfg, rng)
+        flow.update({
+            "labor_trained": structural["trained"],
+            "labor_migrated": structural["migrated"],
+            "jobs_created": structural["jobs_created"],
+            "jobs_closed": structural["jobs_closed"],
+        })
 
     for a in agents:
         if not a.alive:
             continue
-
         a.resources.add("food", -food_cons_tick)
         a.resources.add("energy", -energy_cons_tick)
         flow["food_consumed"] += food_cons_tick
         flow["energy_consumed"] += energy_cons_tick
-
         a.status["survival_mode"] = a.resources.available("food") < food_critical
         a.resources.add("information", 0.05 if rng.random() < a.personality["openness"] else 0.0)
 
@@ -129,7 +149,7 @@ def step_economy(
 
 
 def step_production_recovery(society, cfg: dict, dt_days: float = 0.01) -> None:
-    """v0.4.2 §17–§19: production_multiplier recovery + disruption decay."""
+    """v0.4.2: production_multiplier recovery + disruption decay."""
     econ = cfg.get("economy", {})
     recovery_cfg = econ.get("recovery", {})
     damping = recovery_cfg.get("damping", 0.85)
@@ -142,7 +162,6 @@ def step_production_recovery(society, cfg: dict, dt_days: float = 0.01) -> None:
 
     pm = getattr(society, "production_multiplier", 1.0)
     disruption = getattr(society, "production_disruption", 0.0)
-
     disruption *= disruption_decay
     if disruption < 0.001:
         disruption = 0.0
@@ -154,5 +173,4 @@ def step_production_recovery(society, cfg: dict, dt_days: float = 0.01) -> None:
         pm = min(1.0, pm + recovery)
     elif gap < -0.001:
         pm += gap * 0.05 * dt_days
-
     society.production_multiplier = pm
